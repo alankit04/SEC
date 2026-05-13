@@ -1,188 +1,413 @@
-# AgenticAIFinancialExplainantion
+# RAPHI
 
-Internal product name: RAPHI.
+**RAPHI** is a local-first financial intelligence platform that combines market data, SEC filings, machine learning signals, portfolio risk analytics, durable memory, and an agent/tool execution layer into one research-grade investment analysis system.
 
-RAPHI is a local-first, agentic investment intelligence platform that combines live market data, local SEC EDGAR data, explainable ML signals, portfolio risk analytics, durable memory, and an A2A/MCP-based multi-agent layer.
+The system is designed to answer questions such as:
 
-## What Is Implemented
+- What changed in a company’s market, filing, or signal profile?
+- Which portfolio positions are showing elevated risk?
+- What evidence supports or weakens a buy/sell/hold thesis?
+- How do model signals, SEC fundamentals, market data, and historical memory align?
 
-- Unified primary backend on port 9999 via `backend/raphi_server.py`
-- Browser dashboard and chat UI via `backend/static/index.html`
-- Real-time market data and news sentiment via `backend/market_data.py`
-- Local SEC filing search and XBRL-derived financial extraction via `backend/sec_data.py`
-- XGBoost + GradientBoosting signal engine with SHAP-style explanations via `backend/ml_model.py`
-- Graph-based GNN signal engine via `backend/gnn_model.py`
-- Portfolio snapshot, VaR, Sharpe, alerts, and position management via `backend/portfolio_manager.py`
-- Conviction ledger via `backend/conviction_store.py`
-- Durable graph memory with Neo4j primary and local JSON fallback via `backend/graph_memory.py`
-- Deterministic LLM response guardrails via `backend/llm_guardrails.py`
-- A2A executor and MCP bridge via `backend/a2a_executor_v2.py` and `backend/raphi_mcp_server.py`
+RAPHI is not a trading bot. It is an explainable investment analysis and decision-support system.
 
-## Architecture
+---
 
-### Primary runtime
+## Core Capabilities
 
-- `server.js`
-  Starts the unified RAPHI server with your local `.env`.
+| Area | Description |
+|---|---|
+| Market Intelligence | Retrieves market data, ticker-level summaries, and news sentiment. |
+| SEC Analysis | Searches local SEC EDGAR data and extracts XBRL-derived financial information. |
+| ML Signal Engine | Uses XGBoost and Gradient Boosting models with SHAP-style explanations. |
+| Graph Signals | Includes a GraphSAGE-style GNN signal engine with optional PyTorch Geometric support. |
+| Portfolio Risk | Tracks holdings, portfolio snapshots, VaR, Sharpe ratio, alerts, and position-level risk. |
+| Conviction Tracking | Maintains a conviction ledger for investment reasoning and thesis history. |
+| Memory | Uses Neo4j as the primary graph memory backend with local JSON fallback. |
+| Agent Layer | Supports A2A-style agent execution and MCP-based tool access. |
+| Guardrails | Applies input sanitization, tool allowlists, deterministic output checks, and risk framing. |
+| Browser UI | Provides a local dashboard and streaming chat interface. |
 
-- `backend/raphi_server.py`
-  Main production-style app surface.
-  Exposes:
-  - A2A routes
-  - FastAPI data API under `/api/*`
-  - browser chat and memo generation
-  - conviction ledger endpoints
-  - graph memory endpoints
+---
 
-### Secondary runtime
+## System Architecture
 
-- `backend/main.py`
-  Secondary dev API surface on port 8000.
-  It includes direct GNN endpoints and remains useful for development and isolated testing.
+RAPHI runs through a primary FastAPI application exposed by `backend/raphi_server.py`.
 
-### Agent and tool layer
+```text
+Browser UI
+  |
+  |  /api/chat, /api/memo, /api/stock, /api/portfolio
+  v
+Primary RAPHI Server
+backend/raphi_server.py
+  |
+  |-- Market Data Layer
+  |     backend/market_data.py
+  |
+  |-- SEC Filing Layer
+  |     backend/sec_data.py
+  |
+  |-- ML Signal Layer
+  |     backend/ml_model.py
+  |
+  |-- GNN Signal Layer
+  |     backend/gnn_model.py
+  |
+  |-- Portfolio Risk Layer
+  |     backend/portfolio_manager.py
+  |
+  |-- Conviction Ledger
+  |     backend/conviction_store.py
+  |
+  |-- Memory Layer
+  |     backend/graph_memory.py
+  |
+  |-- Guardrails
+  |     backend/security.py
+  |     backend/llm_guardrails.py
+  |
+  |-- Agent Execution
+        backend/a2a_executor_v2.py
+        backend/raphi_mcp_server.py
+```
 
-- `backend/a2a_executor_v2.py`
-  Claude Agent SDK executor with tool allowlist, session encryption, and prompt sanitization.
+---
 
-- `backend/raphi_mcp_server.py`
-  MCP stdio bridge that exposes market, SEC, ML, portfolio, and memory tools to the agent layer.
+## Runtime Surfaces
+
+### Primary Runtime
+
+```text
+server.js
+backend/raphi_server.py
+```
+
+The primary runtime starts RAPHI on port `9999`.
+
+It serves:
+
+- Browser dashboard
+- Streaming chat
+- Market data APIs
+- Portfolio APIs
+- Signal APIs
+- SEC filing APIs
+- Conviction ledger APIs
+- Memory APIs
+- A2A/MCP-backed agent routes
+
+Start it with:
+
+```bash
+node server.js
+```
+
+Then open:
+
+```text
+http://localhost:9999
+```
+
+---
+
+### Secondary Development Runtime
+
+```text
+backend/main.py
+```
+
+The secondary runtime is used for isolated development, especially direct GNN testing.
+
+Start it with:
+
+```bash
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Primary application work should happen through `backend/raphi_server.py`.
+
+---
+
+## Agent and Tool Execution
+
+RAPHI includes a real agent/tool execution path.
+
+The main components are:
+
+```text
+backend/a2a_executor_v2.py
+backend/raphi_mcp_server.py
+```
+
+The A2A executor manages:
+
+- Tool allowlisting
+- Session encryption
+- Prompt sanitization
+- Agent execution flow
+
+The MCP bridge exposes tools for:
+
+- Market data
+- SEC filings
+- ML signals
+- Portfolio state
+- Memory retrieval
+
+The browser chat first attempts the A2A agent stream. If that path does not return usable text, RAPHI falls back to a local evidence pass that combines market, SEC, ML, GNN, portfolio, and memory context before generating the final response.
+
+---
+
+## Memory System
+
+RAPHI supports durable memory.
+
+Primary memory backend:
+
+```text
+Neo4j
+```
+
+Fallback memory backend:
+
+```text
+.raphi_memory/
+```
+
+Entry point:
+
+```text
+backend/graph_memory.py
+```
+
+If Neo4j is unavailable, RAPHI uses local JSON-backed memory instead of disabling memory completely. This keeps local development usable without requiring a database for every run.
+
+---
+
+## Machine Learning and Signal Generation
+
+RAPHI includes multiple signal layers.
+
+### Traditional ML
+
+Implemented in:
+
+```text
+backend/ml_model.py
+```
+
+Uses:
+
+- XGBoost
+- Gradient Boosting
+- scikit-learn
+- pandas
+- NumPy
+- SHAP-style explanations
+
+### Graph Signal Engine
+
+Implemented in:
+
+```text
+backend/gnn_model.py
+```
+
+Supports:
+
+- GraphSAGE-style modeling
+- Cached graph state
+- Optional PyTorch Geometric backend
+- Blended signal generation when graph artifacts are available
+
+Cached artifacts are stored under:
+
+```text
+.model_cache/
+```
+
+---
+
+## Portfolio and Risk Analytics
+
+Implemented in:
+
+```text
+backend/portfolio_manager.py
+```
+
+RAPHI supports:
+
+- Portfolio snapshots
+- Position management
+- VaR estimation
+- Sharpe ratio calculation
+- Portfolio alerts
+- Signal-aware portfolio review
+
+Portfolio state is stored locally through JSON-backed state files.
+
+---
+
+## Guardrails and Safety Controls
+
+RAPHI includes both input-side and output-side controls.
+
+### Input and Execution Controls
+
+Implemented across:
+
+```text
+backend/security.py
+backend/a2a_executor_v2.py
+backend/raphi_mcp_server.py
+```
+
+Includes:
+
+- User input sanitization
+- MCP internal token protection
+- Explicit tool allowlist
+- API key authentication
+- Rate limiting
+- Session encryption for A2A mappings
+
+### Output Controls
+
+Implemented in:
+
+```text
+backend/llm_guardrails.py
+```
+
+Includes:
+
+- Deterministic post-generation checks
+- Memo schema repair
+- Overconfidence softening
+- Risk framing enforcement
+- Unknown ticker detection
+- Provenance notes
+
+The goal is not to make the model “always right.” The goal is to make unsupported, overconfident, or poorly framed outputs easier to detect and constrain.
+
+---
+
+## Streaming, Caching, and Performance
+
+RAPHI supports streaming responses for chat and memo generation.
+
+Implemented today:
+
+- SSE streaming for chat responses
+- SSE streaming for memo responses
+- Market data TTL caches
+- Fundamental data TTL caches
+- News TTL caches
+- Local model artifact cache
+- GNN state cache
+
+Relevant paths:
+
+```text
+backend/market_data.py
+.model_cache/
+.model_cache/gnn_state.pkl
+```
+
+Not implemented today:
+
+- Direct LLM KV cache control
+- Explicit Anthropic prompt caching policy
+
+Practical implication:
+
+RAPHI can reuse local data/model artifacts and stream responses quickly, but it does not currently manage provider-level LLM KV caching.
+
+---
+
+## Browser Chat Threading
+
+The browser UI supports fresh conversation threads.
+
+The `New Thread` action:
+
+- Clears local chat history
+- Rotates the persistent `thread_id`
+- Aborts any in-flight chat stream
+- Prevents stale responses from leaking into the next thread
+- Resets the console state
+
+This matters because financial analysis conversations often carry ticker, portfolio, and thesis context that should not accidentally bleed across sessions.
+
+---
 
 ## Tech Stack
 
-### Backend and API
+### Backend
 
 - Python
-- FastAPI / Starlette
+- FastAPI
+- Starlette
 - Uvicorn
 - Pydantic
 - SlowAPI
-- SSE streaming responses
+- Server-Sent Events
 
-### AI and agent orchestration
+### Agent and LLM Layer
 
 - Anthropic SDK
 - Claude Agent SDK
 - A2A protocol server
 - MCP server bridge
 
-### Finance and data
+### Data and Finance
 
 - yfinance
-- Local SEC EDGAR quarterly datasets in `data/`
-- XBRL parsing and filing search
+- Local SEC EDGAR datasets
+- XBRL parsing
+- Filing search
 
-### Machine learning and graph modeling
+### Machine Learning
 
 - scikit-learn
 - XGBoost
 - SHAP
-- NumPy
 - pandas
-- GraphSAGE-style GNN engine with optional PyTorch Geometric backend
+- NumPy
+- Optional PyTorch Geometric support
 
-### Memory and persistence
+### Memory and Persistence
 
-- Neo4j HTTP-backed graph memory
-- Local JSON memory fallback in `.raphi_memory/`
-- Pickle-based model cache in `.model_cache/`
-- JSON and JSONL state for settings, portfolio, and conviction ledger
-- Fernet-encrypted A2A session mapping
+- Neo4j
+- Local JSON fallback memory
+- Pickle-based model cache
+- JSON / JSONL state files
+- Fernet-encrypted session mapping
 
 ### Frontend
 
-- Single-file browser app in `backend/static/index.html`
-- Vanilla HTML, CSS, and JavaScript
-- Fetch + streaming UI
+- Single-file browser application
+- HTML
+- CSS
+- JavaScript
+- Fetch API
+- Streaming response handling
 
-### Security and operations
+### Operations
 
-- API key auth
-- internal MCP token auth
-- prompt injection sanitization
-- deterministic output guardrails
-- rate limits
+- API key authentication
+- Internal MCP token authentication
+- Prompt sanitization
+- Rate limiting
 - Sentry support
 
 ### Testing
 
 - pytest
-- browser-level validation can be run against the local app
 
-## Multi-Agent Status
-
-Yes, this project has real multi-agent capability.
-
-- The A2A path is implemented in `backend/a2a_executor_v2.py`.
-- The browser chat in `backend/raphi_server.py` routes through the A2A agent stream first.
-- If the A2A path returns no text, the server falls back to a local specialist evidence pass that combines market, SEC, ML, GNN, portfolio, and memory context before generating the final answer.
-
-Practical interpretation:
-
-- A2A orchestration exists.
-- MCP tools exist.
-- Browser chat is agentic, with a local fallback path.
-
-## Memory Status
-
-Yes, the project can remember past conversation context.
-
-- Primary memory backend: Neo4j
-- Fallback memory backend: local durable JSON store
-- Entry point: `backend/graph_memory.py`
-
-That means memory is still available even when Neo4j is offline. When Neo4j is unavailable, RAPHI uses the local fallback instead of silently disabling durable memory.
-
-## Response Speed and Caching
-
-### Implemented today
-
-- SSE streaming for chat and memo responses
-- market/fundamental/news TTL caches in `backend/market_data.py`
-- model artifact cache in `.model_cache/`
-- GNN state cache in `.model_cache/gnn_state.pkl`
-
-### Not implemented today
-
-- direct LLM KV cache control
-- explicit Anthropic prompt-caching policy in the repo
-
-Practical interpretation:
-
-- The app streams quickly and reuses local data/model caches.
-- It does not currently implement true application-managed KV caching for the LLM itself.
-
-## Guardrails Status
-
-Yes, guardrails are implemented.
-
-### Input and tool guardrails
-
-- `sanitize_user_input()` in `backend/security.py`
-- MCP internal token protection
-- explicit tool allowlist in `backend/a2a_executor_v2.py`
-- rate limiting on API routes
-
-### Output guardrails
-
-- deterministic post-generation checks in `backend/llm_guardrails.py`
-- memo schema repair for required sections
-- overconfidence softening
-- risk framing enforcement
-- unknown ticker detection
-- provenance notes
-
-## Browser Chat Threading
-
-The `New Thread` button now starts a truly fresh browser conversation.
-
-Current behavior:
-
-- clears local chat history
-- rotates the persistent `thread_id`
-- aborts any in-flight chat stream
-- prevents stale responses from leaking into the new thread
-- resets the console so the next question starts cleanly
+---
 
 ## Repository Layout
 
@@ -206,41 +431,56 @@ backend/
   sec_data.py
   security.py
   static/
+
 data/
 docs/
 scripts/
 tests/
+
 server.js
 package.json
 portfolio.json
 settings.json
 ```
 
+---
+
 ## Local Setup
 
-### 1. Create and activate a virtual environment
+### 1. Create a Python virtual environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+```
+
+### 2. Install backend dependencies
+
+```bash
 pip install -r backend/requirements.txt
 ```
 
-### 2. Configure environment variables
+### 3. Configure environment variables
 
-Create `.env` at the project root.
+Create a `.env` file at the project root.
 
 Common variables:
 
-- `RAPHI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `RAPHI_INTERNAL_TOKEN`
-- `NEO4J_URI`
-- `NEO4J_USER`
-- `NEO4J_PASSWORD`
-- `SENTRY_DSN`
+```bash
+RAPHI_API_KEY=
+ANTHROPIC_API_KEY=
+RAPHI_INTERNAL_TOKEN=
 
-### 3. Start the primary app
+NEO4J_URI=
+NEO4J_USER=
+NEO4J_PASSWORD=
+
+SENTRY_DSN=
+```
+
+Neo4j is optional. RAPHI can fall back to local JSON memory when Neo4j is not configured.
+
+### 4. Start the primary application
 
 ```bash
 node server.js
@@ -248,27 +488,32 @@ node server.js
 
 Open:
 
-- `http://localhost:9999`
-
-### 4. Optional: start the secondary dev API
-
-```bash
-source .venv/bin/activate
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```text
+http://localhost:9999
 ```
 
-## Neo4j Memory Setup
+---
 
-Neo4j is optional because local durable fallback memory exists.
+## Optional Neo4j Setup
 
-To use Neo4j as the primary memory backend:
+To use Neo4j as the primary graph memory backend:
 
 ```bash
 export NEO4J_PASSWORD='choose-a-local-password'
 docker-compose -f docker-compose.neo4j.yml up -d
 ```
 
-Then run RAPHI with matching `NEO4J_URI`, `NEO4J_USER`, and `NEO4J_PASSWORD`.
+Then make sure the following variables match your local Neo4j configuration:
+
+```bash
+NEO4J_URI=
+NEO4J_USER=
+NEO4J_PASSWORD=
+```
+
+If Neo4j is offline or unavailable, RAPHI uses local memory fallback.
+
+---
 
 ## Running Tests
 
@@ -277,46 +522,95 @@ source .venv/bin/activate
 pytest
 ```
 
-Current repo test coverage includes:
+Current test coverage includes:
 
-- conviction ledger behavior
-- graph memory behavior
-- SEC data path and ticker mapping behavior
+- Conviction ledger behavior
+- Graph memory behavior
+- SEC data path behavior
+- Ticker mapping behavior
+
+---
 
 ## Key API Surfaces
 
-### Primary server: `backend/raphi_server.py`
+### Health
 
-- `GET /api/health`
-- `GET /api/market/overview`
-- `GET /api/stock/{ticker}`
-- `GET /api/stock/{ticker}/news`
-- `GET /api/stock/{ticker}/signals`
-- `GET /api/stock/{ticker}/filings`
-- `GET /api/portfolio`
-- `PUT /api/portfolio`
-- `GET /api/signals`
-- `GET /api/alerts`
-- `POST /api/chat`
-- `POST /api/memo/{ticker}`
-- `GET /api/convictions/stats`
-- `GET /api/convictions/ledger`
-- `GET /api/memory/status`
-- `GET /api/memory/retrieve`
+```http
+GET /api/health
+```
 
-### Secondary dev server: `backend/main.py`
+### Market and Stock Data
 
-- `GET /api/stock/{ticker}/gnn`
-- `POST /api/gnn/train`
-- `GET /api/gnn/status`
+```http
+GET /api/market/overview
+GET /api/stock/{ticker}
+GET /api/stock/{ticker}/news
+GET /api/stock/{ticker}/signals
+GET /api/stock/{ticker}/filings
+```
 
-## Current Notes
+### Portfolio
 
-- `backend/raphi_server.py` is the authoritative app surface.
-- `backend/main.py` remains useful for development and direct GNN access.
-- The GNN is implemented and blended into signal generation when its cached graph model is available.
-- Durable memory is available even without Neo4j because of the local fallback backend.
+```http
+GET /api/portfolio
+PUT /api/portfolio
+GET /api/signals
+GET /api/alerts
+```
 
-## License
+### Chat and Memo Generation
 
-No license file is included in this repository.
+```http
+POST /api/chat
+POST /api/memo/{ticker}
+```
+
+### Conviction Ledger
+
+```http
+GET /api/convictions/stats
+GET /api/convictions/ledger
+```
+
+### Memory
+
+```http
+GET /api/memory/status
+GET /api/memory/retrieve
+```
+
+### Secondary Development API
+
+Available through `backend/main.py`:
+
+```http
+GET /api/stock/{ticker}/gnn
+POST /api/gnn/train
+GET /api/gnn/status
+```
+
+---
+
+## Current Implementation Notes
+
+- `backend/raphi_server.py` is the authoritative application surface.
+- `backend/main.py` is retained for development and direct GNN testing.
+- The GNN engine is implemented and can be blended into signal generation when cached graph artifacts exist.
+- Memory remains available without Neo4j through local fallback storage.
+- The system supports streaming responses, but does not currently implement application-managed LLM KV caching.
+- The agent path is implemented through A2A execution and MCP tool exposure, with a deterministic fallback path for evidence-based response generation.
+
+---
+
+## Limitations
+
+RAPHI is still a local-first research and engineering system. Current limitations include:
+
+- No direct LLM KV cache management.
+- No explicit Anthropic prompt-caching policy.
+- Local SEC data depends on the datasets available under `data/`.
+- The GNN signal layer depends on available cached graph state.
+- Financial outputs should be treated as decision-support analysis, not investment advice.
+- No license file is currently included in the repository.
+
+---
