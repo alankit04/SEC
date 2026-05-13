@@ -1,0 +1,68 @@
+<h2>What triggers a lookback check?</h2>
+<p class="subtitle">Every conviction in the ledger is pending until something checks it against reality. What fires that check?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Nightly scheduled job</h3>
+      <p>A background task runs every night at market close. It scans all pending convictions, checks which lookback windows have elapsed (30d, 60d, 90d), fetches the current price via yfinance, and marks them confirmed or contradicted.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; line-height: 1.6;">
+        ⏰ 4:30 PM ET daily<br>
+        → scan conviction_ledger.json<br>
+        → for each pending: days_elapsed ≥ 30/60/90?<br>
+        → fetch price via yfinance<br>
+        → mark CONFIRMED / CONTRADICTED<br>
+        → update accuracy scores
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Simple, reliable, no user action needed. Works even when RAPHI isn't being used actively. Accuracy scores are always fresh by morning.</p>
+      <p><strong>Limit:</strong> Requires the server to be running at 4:30 PM. Misses days the server is off.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Lazy — check on access</h3>
+      <p>No background job. When the user opens the Conviction Ledger page or a memo with inline accuracy, RAPHI checks all pending convictions whose windows have elapsed at that moment. Results are cached for the session.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; line-height: 1.6;">
+        User opens Ledger page<br>
+        → check all pending convictions<br>
+        → elapsed? → fetch price → resolve<br>
+        → render accuracy scores<br>
+        → cache until next page load
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Zero infrastructure. No scheduled tasks. No server uptime requirement. Results always match what the user is looking at.</p>
+      <p><strong>Limit:</strong> First page load after a gap feels slow (multiple yfinance calls). Accuracy scores can be stale if user hasn't opened RAPHI in weeks.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Event-driven — on dashboard refresh</h3>
+      <p>The existing <code>liveRefresh()</code> cycle already runs every 30 seconds when market is open and every minute when closed. Add conviction lookback as one more task in that Promise.all. Only checks convictions whose windows have elapsed.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.7rem; font-size: 0.8rem; line-height: 1.6;">
+        liveRefresh() → Promise.all([<br>
+        &nbsp;&nbsp;loadMarketMetrics(),<br>
+        &nbsp;&nbsp;loadDashboardSignals(),<br>
+        &nbsp;&nbsp;loadWatchlistPrices(),<br>
+        &nbsp;&nbsp;<strong style="color:#7c6cf0;">checkPendingConvictions()</strong>  ← new<br>
+        ])
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Fits perfectly into the existing refresh architecture — no new scheduling infrastructure. Convictions resolve in the background as the dashboard updates. Inline accuracy scores stay live.</p>
+      <p><strong>Limit:</strong> Only runs when the dashboard is open. Convictions accumulate if server/UI is idle for days.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 1.25rem; padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">My recommendation</p>
+  <p style="margin-top: 0.5rem;"><strong>C first, A later.</strong> Plugging into the existing <code>liveRefresh()</code> cycle is zero new infrastructure and fits the current architecture exactly. It handles the active-user case perfectly. When RAPHI moves to a more production deployment, add the nightly scheduled job (A) as a second trigger for the idle case. Start with C — it's already wired.</p>
+</div>

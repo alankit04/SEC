@@ -1,0 +1,33 @@
+<h2>Where do we start?</h2>
+<p class="subtitle">Both features are right for 2026. They need to be built in an order. Which do we design first?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Conviction Ledger</h3>
+      <p>RAPHI tracks every research output it generates — ML signal direction, SEC trend verdict, sentiment call — then looks back at 30/60/90 days to check what proved true. Over time it builds an accuracy record per signal type and per market regime. The RIA can see: "RAPHI's SEC trend signals have been right 74% of the time at 90 days for large-cap tech."</p>
+      <br>
+      <p><strong>What it solves:</strong> Trust. No AI financial tool today tracks its own accuracy. This is how RAPHI becomes defensible, not just useful.</p>
+      <p><strong>Depends on:</strong> Existing ML signal + SEC data (already built). Adds a hypothesis store + lookback job.</p>
+      <p><strong>User payoff:</strong> Every research output becomes a bet RAPHI is willing to be accountable for.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Portfolio Narrative Contradiction</h3>
+      <p>RAPHI looks across all held positions and surfaces when the macro theses are internally incoherent — e.g. "You hold NVDA (AI capex bet) at 12% and TLT (rate cut bet) at 8%, but AI capex boom historically coincides with higher-for-longer rates. These positions pull in opposite macro directions." No advisor has a tool that tells them this today.</p>
+      <br>
+      <p><strong>What it solves:</strong> Portfolio coherence. The advisor's most painful blind spot. Surfaces what every CIO knows but no accessible tool computes.</p>
+      <p><strong>Depends on:</strong> Existing portfolio_snapshot + SEC sector data + market agent (already built). Adds a new @portfolio-coherence agent.</p>
+      <p><strong>User payoff:</strong> Direct answer to "is my portfolio internally consistent?" — the question every client asks and every advisor struggles to answer systematically.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 2rem; padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">My read</p>
+  <p style="margin-top: 0.5rem;">A (Conviction Ledger) is the foundation that makes B more defensible later. If RAPHI tracks its own accuracy first, then when the Portfolio Narrative agent makes a claim, it can say "this contradiction pattern has historically mattered — here's RAPHI's track record on similar calls." But B has more immediate user impact and is fully buildable on the current stack. Either order works.</p>
+</div>

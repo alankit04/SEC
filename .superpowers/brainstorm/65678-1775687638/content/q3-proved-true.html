@@ -1,0 +1,73 @@
+<h2>What does "proved true" mean?</h2>
+<p class="subtitle">Each of the four tracked outputs needs a clear, automatable definition of correctness. Some are obvious. One is not. Pick the definition set that feels right.</p>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem;">
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #4ade80;">
+    <p class="label" style="color: #4ade80;">ML Signal — unambiguous</p>
+    <h3 style="margin: 0.5rem 0;">Price direction at 30 / 60 / 90 days</h3>
+    <p>If signal said LONG and price is higher at the checkpoint → CONFIRMED.<br>
+    If signal said SHORT and price is lower → CONFIRMED.<br>
+    Measured vs closing price on conviction date.</p>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.6rem; font-family: monospace; font-size: 0.8rem; margin-top: 0.75rem;">
+      NVDA LONG @ $890 → 30d: $962 → ✅ +8.1%
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #4ade80;">
+    <p class="label" style="color: #4ade80;">SEC Trend — unambiguous</p>
+    <h3 style="margin: 0.5rem 0;">Next quarter XBRL confirms or contradicts</h3>
+    <p>If verdict said "accelerating" and next 10-Q revenue is higher QoQ → CONFIRMED.<br>
+    If verdict said "decelerating" and next 10-Q is lower → CONFIRMED.<br>
+    Checked automatically when new EDGAR data arrives.</p>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.6rem; font-family: monospace; font-size: 0.8rem; margin-top: 0.75rem;">
+      NVDA Revenue: Accelerating → Q2 filing: +12% QoQ → ✅
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #f59e0b;">
+    <p class="label" style="color: #f59e0b;">Sentiment — needs a choice</p>
+    <h3 style="margin: 0.5rem 0;">Three options — pick one</h3>
+    <div class="options" data-multiselect style="margin-top: 0.5rem;">
+      <div class="option" data-choice="sent-1" onclick="toggleSelect(this)" style="padding: 0.6rem 0.9rem; margin-bottom: 0.5rem;">
+        <div class="letter" style="width:1.5rem; height:1.5rem; font-size:0.7rem;">S1</div>
+        <div class="content">
+          <h3 style="font-size: 0.9rem;">5-day price reaction to news</h3>
+          <p style="font-size: 0.8rem;">Positive sentiment → price up 5 days later. Fast feedback.</p>
+        </div>
+      </div>
+      <div class="option" data-choice="sent-2" onclick="toggleSelect(this)" style="padding: 0.6rem 0.9rem; margin-bottom: 0.5rem;">
+        <div class="letter" style="width:1.5rem; height:1.5rem; font-size:0.7rem;">S2</div>
+        <div class="content">
+          <h3 style="font-size: 0.9rem;">Vs. sector return at 30 days</h3>
+          <p style="font-size: 0.8rem;">Positive sentiment → stock outperforms its sector peers. Removes market noise.</p>
+        </div>
+      </div>
+      <div class="option" data-choice="sent-3" onclick="toggleSelect(this)" style="padding: 0.6rem 0.9rem;">
+        <div class="letter" style="width:1.5rem; height:1.5rem; font-size:0.7rem;">S3</div>
+        <div class="content">
+          <h3 style="font-size: 0.9rem;">Don't score sentiment separately</h3>
+          <p style="font-size: 0.8rem;">Sentiment is an input to the Signal View. Score the Signal View only. Sentiment accuracy is implicit.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #7c6cf0;">
+    <p class="label" style="color: #7c6cf0;">Signal View — the composite</p>
+    <h3 style="margin: 0.5rem 0;">Risk-adjusted return vs S&P 500</h3>
+    <p>The final Positive / Negative / Neutral verdict is checked against the stock's return <em>relative to SPY</em> at 30/60/90 days.</p>
+    <p style="margin-top: 0.5rem;">Positive → stock outperforms SPY → CONFIRMED.<br>
+    Negative → stock underperforms SPY → CONFIRMED.<br>
+    Neutral → within ±2% of SPY → CONFIRMED.</p>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.6rem; font-family: monospace; font-size: 0.8rem; margin-top: 0.75rem;">
+      NVDA Positive → +8.1% vs SPY +1.3% → ✅ outperformed
+    </div>
+  </div>
+
+</div>
+
+<div style="padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">My recommendation on sentiment</p>
+  <p style="margin-top: 0.5rem;"><strong>S3</strong> — Don't score sentiment separately. VADER is the weakest signal in RAPHI. Giving it a standalone accuracy score risks surfacing that it's ~50% accurate, which erodes trust in the rest of the ledger. Sentiment feeds into the Signal View, which already gets scored vs. SPY. That's sufficient. Add standalone sentiment scoring in a later version once VADER is replaced with a better model.</p>
+</div>

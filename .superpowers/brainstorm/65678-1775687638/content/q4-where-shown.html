@@ -1,0 +1,81 @@
+<h2>Where does the user see the accuracy record?</h2>
+<p class="subtitle">The ledger is only useful if the advisor sees it at the right moment. Where should RAPHI's track record surface?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Inline on every research output</h3>
+      <p>Each memo and signal shows RAPHI's historical accuracy for that ticker and signal type — right below the conviction.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.15); border-radius: 8px; padding: 1rem; font-size: 0.82rem; line-height: 1.7;">
+        <div style="color: #7c6cf0; font-weight: 600; font-size: 0.9rem;">NVDA — Signal View: Positive · MEDIUM conviction</div>
+        <div style="color: #94a3b8; font-size: 0.78rem; margin-top: 0.25rem;">ML: LONG (0.68) · SEC: Accelerating · Apr 8, 2026</div>
+        <div style="margin-top: 0.75rem; padding: 0.6rem; background: rgba(124,108,240,0.08); border-radius: 6px; border-left: 2px solid #7c6cf0;">
+          <span style="color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">RAPHI Track Record on NVDA</span><br>
+          <span style="font-size: 0.82rem;">ML signals: <strong style="color:#4ade80;">72%</strong> accurate at 60d (11 calls) · SEC trends: <strong style="color:#4ade80;">78%</strong> confirmed (9 filings)</span>
+        </div>
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Context at the exact moment of decision. Advisor sees accuracy before acting on the signal.</p>
+      <p><strong>Limit:</strong> Requires enough historical calls to show meaningful accuracy. Shows nothing for new tickers.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Dedicated Track Record page</h3>
+      <p>A new RAPHI dashboard section — "Conviction Ledger" — showing aggregate accuracy across all tickers, all signal types, all lookback windows.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.15); border-radius: 8px; padding: 1rem; font-size: 0.82rem; line-height: 1.7;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+          <div style="background: rgba(74,222,128,0.1); border-radius: 6px; padding: 0.5rem; text-align:center;">
+            <div style="color:#4ade80; font-size:1.4rem; font-weight:700;">71%</div>
+            <div style="color:#94a3b8; font-size:0.72rem;">ML Signal<br>30-day accuracy</div>
+          </div>
+          <div style="background: rgba(74,222,128,0.1); border-radius: 6px; padding: 0.5rem; text-align:center;">
+            <div style="color:#4ade80; font-size:1.4rem; font-weight:700;">76%</div>
+            <div style="color:#94a3b8; font-size:0.72rem;">SEC Trend<br>next-filing accuracy</div>
+          </div>
+          <div style="background: rgba(124,108,240,0.1); border-radius: 6px; padding: 0.5rem; text-align:center;">
+            <div style="color:#7c6cf0; font-size:1.4rem; font-weight:700;">68%</div>
+            <div style="color:#94a3b8; font-size:0.72rem;">Signal View<br>vs SPY at 60d</div>
+          </div>
+        </div>
+        <div style="color:#94a3b8; font-size:0.78rem; text-align:center;">Based on 47 calls · 12 tickers · Last updated Apr 8, 2026</div>
+        <div style="margin-top: 0.5rem; font-size: 0.78rem; color: #94a3b8;">📋 28 pending lookbacks · 19 confirmed · 0 expired</div>
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Full picture of RAPHI's performance. Advisor can review before trusting the system at all. Builds credibility over time.</p>
+      <p><strong>Limit:</strong> Separate from the research flow — advisor has to navigate there deliberately.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Both — inline summary + dedicated page</h3>
+      <p>Every research output shows a compact accuracy line. The full Conviction Ledger page shows aggregate stats, pending lookbacks, regime breakdown, and full history.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.15); border-radius: 8px; padding: 0.75rem; font-size: 0.82rem;">
+        <div style="color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;">On every memo (compact):</div>
+        <div style="font-size: 0.8rem; padding: 0.4rem 0.6rem; background: rgba(124,108,240,0.08); border-radius: 4px; border-left: 2px solid #7c6cf0;">
+          RAPHI ML accuracy on NVDA: <strong style="color:#4ade80;">72%</strong> at 60d · <a style="color:#7c6cf0;">Full ledger →</a>
+        </div>
+        <div style="color: #94a3b8; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin: 0.75rem 0 0.35rem;">Ledger page (full):</div>
+        <div style="font-size: 0.8rem; padding: 0.4rem 0.6rem; background: rgba(0,0,0,0.2); border-radius: 4px;">
+          All tickers · all signal types · regime breakdown · pending queue · full history table
+        </div>
+      </div>
+      <br>
+      <p><strong>Why this works:</strong> Right information at the right moment. Compact inline for quick context. Full page for due diligence.</p>
+      <p><strong>Build order:</strong> Ship the ledger page first (data store + lookback job). Add inline to research outputs once ledger has data.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 1.25rem; padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">My recommendation</p>
+  <p style="margin-top: 0.5rem;"><strong>C</strong> — both surfaces, built in order. The ledger page is the data layer. The inline compact view is the UX layer. Build the page first — it forces you to get the data model right. The inline view is two lines of code once the data exists. Together they make RAPHI's track record unavoidable, not optional.</p>
+</div>

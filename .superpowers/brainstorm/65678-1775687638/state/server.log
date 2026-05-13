@@ -1,0 +1,13 @@
+{"type":"server-started","port":60293,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:60293","screen_dir":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content","state_dir":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/state"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/q1-which-first.html"}
+{"source":"user-event","type":"click","text":"A\n    \n      Conviction Ledger\n      RAPHI tracks every research output it generates — ML signal direction, SEC trend verdict, sentiment call — then looks back at 30/60/90 days to check what proved true. Over time it builds an accuracy record per signal type and per market regime. The RIA can see: \"RAPHI's SEC trend signals have been right 74% of the time at 90 days for large-cap tech.\"\n      \n      What it solves: Trust. No AI financial tool today tracks its own accuracy. This is how RAPHI becomes defensible, not just useful.\n      Depends on: Existing ML signal + SEC data (already built). Adds a hypothesis store + lookback job.\n      User payoff: Every research output becomes a bet RAPHI is willing to be accountable for.","choice":"a","id":null,"timestamp":1775687714987}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/q2-what-is-conviction.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/q3-proved-true.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/q4-where-shown.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/q5-lookback-trigger.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/waiting-1.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/design-section1-datamodel.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/design-section2-backend.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/design-section4-dataflow.html"}
+{"type":"screen-added","file":"/Users/alan/Desktop/SEC Data/.superpowers/brainstorm/65678-1775687638/content/design-section3-frontend.html"}
+{"type":"server-stopped","reason":"idle timeout"}

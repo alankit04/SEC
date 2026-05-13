@@ -1,0 +1,10 @@
+{
+  "positions": [
+    {
+      "ticker": "'; DROP TABLE--",
+      "shares": 0,
+      "entry_price": 0,
+      "direction": "LONG"
+    }
+  ]
+}

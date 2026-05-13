@@ -1,0 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAPHI — Real-time Agentic Platform for Human Investment Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   RAPHI DESIGN SYSTEM — COLOR TOKENS
+   ============================================================ */
+:root {
+  --bg-primary:    #060C18;
+  --bg-secondary:  #0E1628;
+  --bg-card:       #111D34;
+  --bg-card-hover: #162340;
+  --bg-input:      #0C1526;
+  --accent-blue:   #5AA9FF;
+  --accent-teal:   #3CE1B5;
+  --accent-warn:   #FFB454;
+  --accent-red:    #FF5A7A;
+  --accent-purple: #A78BFA;
+  --text-primary:  #E8F0FF;
+  --text-secondary:#8FA6C9;
+  --text-muted:    #4D6080;
+  --border:        rgba(90,169,255,0.12);
+  --border-hover:  rgba(90,169,255,0.28);
+  --glow-blue:     rgba(90,169,255,0.15);
+  --glow-teal:     rgba(60,225,181,0.15);
+  --glow-warn:     rgba(255,180,84,0.15);
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
+  --sp-12: 48px; --sp-16: 64px;
+
+  --r-sm: 6px; --r-md: 10px; --r-lg: 16px; --r-xl: 24px;
+
+  --sidebar-w: 260px;
+  --topbar-h: 56px;
+  --rightpanel-w: 320px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1.5;
+  overflow: hidden;
+  height: 100vh;
+}
+
+.h1 { font-family: 'Instrument Serif', serif; font-size: 48px; font-weight: 400; line-height: 1.1; letter-spacing: -1px; }
+.h2 { font-size: 32px; font-weight: 600; line-height: 1.2; letter-spacing: -0.5px; }
+.h3 { font-size: 22px; font-weight: 600; line-height: 1.3; }
+.h4 { font-size: 18px; font-weight: 500; }
+.body { font-size: 16px; font-weight: 400; }
+.small { font-size: 13px; font-weight: 400; }
+.mono { font-family: 'DM Mono', monospace; font-size: 13px; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 4px; }
+
+#app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+.screen {
+  display: none;
+  position: fixed; inset: 0;
+  z-index: 100;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.screen.active { display: flex; }
+
+#screen-landing {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(90,169,255,0.18) 0%, transparent 60%),
+              radial-gradient(ellipse 50% 40% at 80% 100%, rgba(60,225,181,0.1) 0%, transparent 50%),
+              var(--bg-primary);
+  overflow: hidden;
+}
+
+.landing-grid {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(90,169,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(90,169,255,0.04) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 30%, transparent 100%);
+}
+
+.landing-content {
+  position: relative; z-index: 2;
+  display: flex; flex-direction: column;
+  align-items: center; text-align: center;
+  gap: var(--sp-8); max-width: 820px; padding: var(--sp-8);
+}
+
+.raphi-logo-mark {
+  width: 64px; height: 64px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-teal));
+  border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'DM Mono', monospace; font-size: 24px; font-weight: 500;
+  color: var(--bg-primary);
+  box-shadow: 0 0 40px rgba(90,169,255,0.4), 0 0 80px rgba(60,225,181,0.15);
+  animation: logoFloat 4s ease-in-out infinite;
+}
+
+@keyframes logoFloat {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-6px) scale(1.02); }
+}
+
+.landing-badge {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  background: rgba(90,169,255,0.08);
+  border: 1px solid rgba(90,169,255,0.2);
+  border-radius: 999px; padding: 6px 14px;
+  font-size: 12px; color: var(--accent-blue); font-weight: 500;
+}
+
+.landing-badge::before {
+  content: ''; width: 6px; height: 6px;
+  background: var(--accent-teal); border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+.landing-title { color: var(--text-primary); }
+.landing-title em { font-style: italic; color: var(--accent-blue); }
+.landing-sub {
+  font-size: 18px; color: var(--text-secondary); max-width: 560px; line-height: 1.6;
+}
+.landing-cta { display: flex; gap: var(--sp-4); align-items: center; }
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent-blue), #3D8FFF);
+  color: var(--bg-primary); border: none; border-radius: var(--r-md);
+  padding: 12px 28px; font-size: 15px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s ease;
+  box-shadow: 0 4px 24px rgba(90,169,255,0.3);
+  font-family: 'DM Sans', sans-serif;
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 32px rgba(90,169,255,0.45);
+}
+
+.btn-ghost {
+  background: transparent; color: var(--text-secondary);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 12px 28px; font-size: 15px; font-weight: 500;
+  cursor: pointer; transition: all 0.2s ease;
+  font-family: 'DM Sans', sans-serif;
+}
+.btn-ghost:hover { border-color: var(--border-hover); color: var(--text-primary); background: rgba(90,169,255,0.05); }
+
+.landing-stats {
+  display: flex; gap: var(--sp-8);
+  padding-top: var(--sp-8); border-top: 1px solid var(--border);
+}
+.stat-item { display: flex; flex-direction: column; gap: 4px; }
+.stat-num { font-size: 28px; font-weight: 600; color: var(--text-primary); }
+.stat-label { font-size: 12px; color: var(--text-muted); }
+
+.login-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  padding: var(--sp-10);
+  width: 420px;
+  box-shadow: 0 32px 80px rgba(0,0,0,0.5);
+  animation: fadeSlideUp 0.5s ease both;
+}
+
+#screen-login {
+  align-items: center; justify-content: center;
+  background: radial-gradient(ellipse 60% 80% at 20% 50%, rgba(90,169,255,0.1) 0%, transparent 60%), var(--bg-primary);
+}
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.login-logo { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-8); }
+.login-logo-mark,
+.topbar-logomark {
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-teal));
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'DM Mono', monospace;
+  color: var(--bg-primary);
+}
+.login-logo-mark {
+  width: 40px; height: 40px; border-radius: 10px; font-size: 16px; font-weight: 500;
+}
+.login-brand { font-size: 20px; font-weight: 600; }
+.login-form { display: flex; flex-direction: column; gap: var(--sp-4); }
+.form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
+.form-label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+.form-input {
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 11px 14px;
+  color: var(--text-primary); font-size: 15px; font-family: 'DM Sans', sans-serif;
+  transition: all 0.2s ease; outline: none;
+}
+.form-input:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(90,169,255,0.12); }
+.form-input::placeholder { color: var(--text-muted); }
+.login-divider {
+  display: flex; align-items: center; gap: var(--sp-4);
+  color: var(--text-muted); font-size: 12px; margin: var(--sp-2) 0;
+}
+.login-divider::before, .login-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+
+#screen-onboarding {
+  flex-direction: column; align-items: center;
+  background: var(--bg-primary); overflow-y: auto;
+}
+.onboarding-header {
+  width: 100%; padding: var(--sp-6) var(--sp-10);
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+.onboarding-steps {
+  display: flex; gap: var(--sp-2); align-items: center;
+}
+.step-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-muted); transition: all 0.3s ease;
+}
+.step-dot.active { background: var(--accent-blue); width: 24px; border-radius: 4px; }
+.step-dot.done { background: var(--accent-teal); }
+.onboarding-body {
+  flex: 1; width: 100%; max-width: 680px;
+  padding: var(--sp-12) var(--sp-8);
+  display: flex; flex-direction: column; gap: var(--sp-8);
+}
+.ob-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-6);
+  transition: all 0.3s ease; cursor: pointer;
+}
+.ob-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+.ob-card.selected { border-color: var(--accent-blue); background: rgba(90,169,255,0.05); }
+.ob-card-header { display: flex; align-items: center; gap: var(--sp-4); margin-bottom: var(--sp-3); }
+.ob-icon {
+  width: 44px; height: 44px; border-radius: var(--r-md);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+}
+
+#main-app {
+  display: none;
+  flex-direction: column; height: 100vh; overflow: hidden;
+}
+#main-app.active { display: flex; }
+.topbar {
+  height: var(--topbar-h); min-height: var(--topbar-h);
+  background: rgba(14,22,40,0.95);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  padding: 0 var(--sp-6); gap: var(--sp-6);
+  position: relative; z-index: 50;
+}
+.topbar-logo { display: flex; align-items: center; gap: var(--sp-3); min-width: 200px; }
+.topbar-logomark {
+  width: 32px; height: 32px;
+  border-radius: 8px; font-size: 13px; font-weight: 500;
+  box-shadow: 0 0 16px rgba(90,169,255,0.3);
+}
+.topbar-name { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+.topbar-version { font-size: 10px; color: var(--text-muted); background: rgba(90,169,255,0.08); border: 1px solid var(--border); padding: 2px 6px; border-radius: 4px; }
+.topbar-search {
+  flex: 1; max-width: 500px;
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: 0 var(--sp-4); height: 36px;
+  transition: all 0.2s ease;
+}
+.topbar-search:focus-within {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(90,169,255,0.1);
+}
+.topbar-search svg { color: var(--text-muted); flex-shrink: 0; }
+.topbar-search input {
+  background: none; border: none; outline: none; color: var(--text-primary);
+  font-size: 14px; font-family: 'DM Sans', sans-serif; flex: 1;
+}
+.topbar-search input::placeholder { color: var(--text-muted); }
+.search-hint { font-size: 11px; color: var(--text-muted); background: rgba(255,255,255,0.04); border: 1px solid var(--border); padding: 2px 6px; border-radius: 4px; flex-shrink: 0; }
+.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: var(--sp-3); }
+.topbar-btn {
+  width: 36px; height: 36px; border-radius: var(--r-md);
+  background: transparent; border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; color: var(--text-secondary); transition: all 0.2s ease;
+  position: relative;
+}
+.topbar-btn:hover { border-color: var(--border-hover); color: var(--text-primary); background: rgba(90,169,255,0.05); }
+.notif-dot {
+  position: absolute; top: 6px; right: 6px;
+  width: 6px; height: 6px; background: var(--accent-warn);
+  border-radius: 50%; border: 1.5px solid var(--bg-secondary);
+}
+.market-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(60,225,181,0.08); border: 1px solid rgba(60,225,181,0.15);
+  border-radius: 999px; padding: 5px 12px;
+  font-size: 12px; font-weight: 500;
+}
+.market-chip .dot { width: 5px; height: 5px; background: var(--accent-teal); border-radius: 50%; animation: pulse 2s infinite; }
+.market-chip .val { color: var(--accent-teal); }
+.avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: linear-gradient(135deg, #5AA9FF, #3CE1B5);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; color: var(--bg-primary);
+  cursor: pointer;
+}
+.app-body { flex: 1; display: flex; overflow: hidden; }
+.sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: var(--sp-5) 0;
+  overflow-y: auto;
+}
+.sidebar-section { margin-bottom: var(--sp-6); }
+.sidebar-section-label {
+  padding: 0 var(--sp-5); margin-bottom: var(--sp-2);
+  font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.nav-item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: 9px var(--sp-5); cursor: pointer;
+  color: var(--text-secondary); font-size: 14px; font-weight: 400;
+  transition: all 0.15s ease; border-left: 2px solid transparent;
+  position: relative;
+}
+.nav-item:hover { color: var(--text-primary); background: rgba(90,169,255,0.05); border-left-color: rgba(90,169,255,0.3); }
+.nav-item.active { color: var(--accent-blue); background: rgba(90,169,255,0.08); border-left-color: var(--accent-blue); font-weight: 500; }
+.nav-item .nav-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; opacity: 0.8; }
+.nav-item.active .nav-icon { opacity: 1; }
+.nav-badge { margin-left: auto; background: var(--accent-warn); color: var(--bg-primary); font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; }
+.nav-badge.blue { background: var(--accent-blue); }
+.nav-badge.teal { background: var(--accent-teal); }
+.sidebar-footer {
+  margin-top: auto; padding: var(--sp-5);
+  border-top: 1px solid var(--border);
+}
+.agent-status {
+  display: flex; align-items: center; gap: var(--sp-3);
+  background: rgba(60,225,181,0.06);
+  border: 1px solid rgba(60,225,181,0.12);
+  border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+}
+.agent-pulse {
+  width: 8px; height: 8px; background: var(--accent-teal); border-radius: 50%;
+  animation: pulse 2s infinite; flex-shrink: 0;
+}
+.agent-info { flex: 1; }
+.agent-label { font-size: 11px; color: var(--accent-teal); font-weight: 600; }
+.agent-sub { font-size: 10px; color: var(--text-muted); }
+.main-content {
+  flex: 1; overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+.right-panel {
+  width: var(--rightpanel-w); min-width: var(--rightpanel-w);
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  overflow-y: auto; padding: var(--sp-6);
+  display: flex; flex-direction: column; gap: var(--sp-5);
+}
+.page { display: none; padding: var(--sp-8); animation: pageIn 0.3s ease both; }
+.page.active { display: block; }
+@keyframes pageIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.page-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  margin-bottom: var(--sp-8);
+}
+.page-title { display: flex; flex-direction: column; gap: var(--sp-2); }
+.card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-6);
+  transition: all 0.2s ease;
+}
+.card:hover { border-color: var(--border-hover); }
+.card.glow:hover { box-shadow: 0 0 0 1px rgba(90,169,255,0.15), 0 8px 32px rgba(90,169,255,0.1); }
+.card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--sp-5);
+}
+.card-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.card-meta { font-size: 12px; color: var(--text-muted); }
+.metric-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-4);
+  margin-bottom: var(--sp-6);
+}
+.metric-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-5);
+  transition: all 0.25s ease; cursor: default;
+  animation: cardFadeIn 0.5s ease both;
+}
+.metric-card:nth-child(2) { animation-delay: 0.05s; }
+.metric-card:nth-child(3) { animation-delay: 0.1s; }
+.metric-card:nth-child(4) { animation-delay: 0.15s; }
+@keyframes cardFadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+.metric-card:hover { border-color: var(--border-hover); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
+.metric-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: var(--sp-2); }
+.metric-value { font-size: 28px; font-weight: 700; color: var(--text-primary); line-height: 1; margin-bottom: var(--sp-2); }
+.metric-change { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 500; }
+.metric-change.up { color: var(--accent-teal); }
+.metric-change.down { color: var(--accent-red); }
+.metric-change.neutral { color: var(--text-muted); }
+.metric-sparkline { height: 32px; margin-top: var(--sp-3); }
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+}
+.badge-blue { background: rgba(90,169,255,0.12); color: var(--accent-blue); border: 1px solid rgba(90,169,255,0.2); }
+.badge-teal { background: rgba(60,225,181,0.12); color: var(--accent-teal); border: 1px solid rgba(60,225,181,0.2); }
+.badge-warn { background: rgba(255,180,84,0.12); color: var(--accent-warn); border: 1px solid rgba(255,180,84,0.2); }
+.badge-red  { background: rgba(255,90,122,0.12); color: var(--accent-red);  border: 1px solid rgba(255,90,122,0.2); }
+.badge-purple { background: rgba(167,139,250,0.12); color: var(--accent-purple); border: 1px solid rgba(167,139,250,0.2); }
+.signal-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-5);
+  cursor: pointer; transition: all 0.2s ease;
+}
+.signal-card:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 0 0 1px rgba(90,169,255,0.1), 0 4px 20px var(--glow-blue);
+}
+.signal-card.bullish:hover { box-shadow: 0 0 0 1px rgba(60,225,181,0.2), 0 4px 20px var(--glow-teal); }
+.signal-card.bearish:hover { box-shadow: 0 0 0 1px rgba(255,90,122,0.2), 0 4px 20px rgba(255,90,122,0.12); }
+.signal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-3); }
+.signal-ticker { font-family: 'DM Mono', monospace; font-size: 16px; font-weight: 500; }
+.signal-price { font-size: 22px; font-weight: 700; }
+.signal-meta { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-3); }
+.confidence-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; }
+.confidence-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--accent-blue), var(--accent-teal)); animation: barGrow 0.8s ease both; }
+@keyframes barGrow { from { width: 0 !important; } }
+.tabs { display: flex; gap: 2px; background: rgba(255,255,255,0.03); border-radius: var(--r-md); padding: 3px; width: fit-content; margin-bottom: var(--sp-6); }
+.tab {
+  padding: 7px 16px; border-radius: var(--r-sm);
+  font-size: 13px; font-weight: 500; color: var(--text-muted);
+  cursor: pointer; transition: all 0.15s ease;
+}
+.tab.active { background: var(--bg-card); color: var(--text-primary); box-shadow: 0 1px 4px rgba(0,0,0,0.2); }
+.tab:hover:not(.active) { color: var(--text-secondary); }
+.data-table { width: 100%; border-collapse: collapse; }
+.data-table th {
+  text-align: left; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted);
+  padding: var(--sp-3) var(--sp-4); border-bottom: 1px solid var(--border);
+}
+.data-table td {
+  padding: 12px var(--sp-4); border-bottom: 1px solid rgba(90,169,255,0.05);
+  font-size: 14px; color: var(--text-secondary);
+}
+.data-table tr:hover td { background: rgba(90,169,255,0.03); color: var(--text-primary); }
+.data-table td:first-child { color: var(--text-primary); font-weight: 500; }
+.heatmap { display: grid; gap: 2px; }
+.heatmap-cell {
+  border-radius: 3px; display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 600; color: var(--bg-primary);
+  transition: all 0.2s ease; cursor: pointer;
+}
+.heatmap-cell:hover { filter: brightness(1.2) saturate(1.2); transform: scale(1.05); }
+.shap-row { display: flex; align-items: center; gap: var(--sp-4); margin-bottom: var(--sp-3); }
+.shap-label { font-size: 13px; color: var(--text-secondary); width: 140px; flex-shrink: 0; }
+.shap-bar-track { flex: 1; height: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
+.shap-bar-fill { height: 100%; border-radius: 4px; animation: barGrow 1s ease both; }
+.shap-val { font-size: 12px; font-family: 'DM Mono', monospace; width: 56px; text-align: right; }
+.shap-pos { background: linear-gradient(90deg, var(--accent-teal), #2BC4A0); }
+.shap-neg { background: linear-gradient(90deg, #FF5A7A, #E03060); }
+.alert-row {
+  display: flex; align-items: center; gap: var(--sp-4);
+  padding: var(--sp-4); border-radius: var(--r-md);
+  border: 1px solid var(--border); background: var(--bg-card);
+  margin-bottom: var(--sp-3); cursor: pointer;
+  transition: all 0.2s ease;
+  animation: slideInAlert 0.4s ease both;
+}
+.alert-row:hover { border-color: var(--border-hover); }
+@keyframes slideInAlert {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.alert-icon { width: 36px; height: 36px; border-radius: var(--r-md); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+.alert-body { flex: 1; }
+.alert-title { font-size: 14px; font-weight: 500; color: var(--text-primary); }
+.alert-sub { font-size: 12px; color: var(--text-muted); }
+.alert-time { font-size: 11px; color: var(--text-muted); font-family: 'DM Mono', monospace; }
+.news-card {
+  display: flex; gap: var(--sp-4);
+  padding: var(--sp-5); background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  cursor: pointer; transition: all 0.2s ease; margin-bottom: var(--sp-3);
+}
+.news-card:hover { border-color: var(--border-hover); }
+.news-img { width: 64px; height: 64px; border-radius: var(--r-sm); flex-shrink: 0; }
+.news-body { flex: 1; }
+.news-title { font-size: 14px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px; line-height: 1.4; }
+.news-meta { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-2); }
+.sentiment-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 600;
+}
+.sentiment-pos { background: rgba(60,225,181,0.12); color: var(--accent-teal); }
+.sentiment-neg { background: rgba(255,90,122,0.12); color: var(--accent-red); }
+.memo-block {
+  border-left: 2px solid var(--accent-blue);
+  padding: var(--sp-4) var(--sp-5);
+  background: rgba(90,169,255,0.04);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  margin-bottom: var(--sp-4);
+  animation: memoReveal 0.6s ease both;
+}
+.memo-block:nth-child(2) { animation-delay: 0.15s; }
+.memo-block:nth-child(3) { animation-delay: 0.3s; }
+.memo-block:nth-child(4) { animation-delay: 0.45s; }
+@keyframes memoReveal {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.memo-section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent-blue); margin-bottom: var(--sp-2); }
+.memo-text { font-size: 14px; line-height: 1.6; color: var(--text-secondary); }
+.console-area {
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  border-radius: var(--r-xl); overflow: hidden;
+}
+.console-messages {
+  padding: var(--sp-8); min-height: 400px; max-height: 500px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: var(--sp-5);
+}
+.console-input-row {
+  display: flex; align-items: flex-end; gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  border-top: 1px solid var(--border);
+  background: rgba(6,12,24,0.5);
+}
+.console-input {
+  flex: 1; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-4) var(--sp-5);
+  color: var(--text-primary); font-size: 15px; font-family: 'DM Sans', sans-serif;
+  outline: none; resize: none; min-height: 52px; max-height: 120px;
+  transition: all 0.2s ease; line-height: 1.5;
+}
+.console-input:focus { border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(90,169,255,0.1); }
+.console-send {
+  width: 48px; height: 48px; background: linear-gradient(135deg, var(--accent-blue), #3D8FFF);
+  border: none; border-radius: var(--r-md); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: white; transition: all 0.2s ease; flex-shrink: 0;
+}
+.console-send:hover { transform: scale(1.05); box-shadow: 0 4px 16px rgba(90,169,255,0.4); }
+.msg-user { align-self: flex-end; max-width: 70%; background: rgba(90,169,255,0.1); border: 1px solid rgba(90,169,255,0.2); border-radius: 16px 16px 4px 16px; padding: var(--sp-4) var(--sp-5); font-size: 14px; }
+.msg-ai { align-self: flex-start; max-width: 90%; }
+.msg-ai-header { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.ai-avatar { width: 32px; height: 32px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-teal)); border-radius: var(--r-md); display: flex; align-items: center; justify-content: center; font-family: 'DM Mono'; font-size: 12px; font-weight: 500; color: var(--bg-primary); flex-shrink: 0; }
+.response-card {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); overflow: hidden;
+}
+.response-section { padding: var(--sp-5); border-bottom: 1px solid var(--border); }
+.response-section:last-child { border-bottom: none; }
+.conf-ring { position: relative; width: 80px; height: 80px; }
+.conf-ring svg { transform: rotate(-90deg); }
+.conf-ring .ring-bg { fill: none; stroke: rgba(255,255,255,0.06); stroke-width: 6; }
+.conf-ring .ring-fill { fill: none; stroke-width: 6; stroke-linecap: round; transition: stroke-dashoffset 1s ease; }
+.conf-ring .ring-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; }
+.timeline { display: flex; flex-direction: column; gap: 0; }
+.timeline-item { display: flex; gap: var(--sp-4); }
+.timeline-line { display: flex; flex-direction: column; align-items: center; }
+.timeline-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.timeline-connector { flex: 1; width: 1px; background: var(--border); margin: 4px 0; }
+.timeline-body { padding-bottom: var(--sp-5); }
+.timeline-label { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.timeline-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: 'DM Mono', monospace; }
+.btn-sm {
+  padding: 7px 14px; font-size: 13px; font-weight: 500;
+  border-radius: var(--r-sm); cursor: pointer; transition: all 0.2s ease;
+  font-family: 'DM Sans', sans-serif;
+}
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+.btn-outline:hover { border-color: var(--border-hover); color: var(--text-primary); background: rgba(90,169,255,0.05); }
+.btn-teal { background: rgba(60,225,181,0.12); border: 1px solid rgba(60,225,181,0.2); color: var(--accent-teal); }
+.btn-teal:hover { background: rgba(60,225,181,0.2); }
+.watchlist-item {
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: var(--sp-3) 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+  cursor: pointer; transition: all 0.2s ease;
+}
+.watchlist-item:hover { background: transparent; }
+.watchlist-ticker { font-family: 'DM Mono', monospace; font-size: 14px; font-weight: 500; width: 56px; }
+.watchlist-name { font-size: 12px; color: var(--text-muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watchlist-price { font-size: 13px; font-weight: 500; font-family: 'DM Mono', monospace; }
+.watchlist-chg { font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; }
+.chg-up { background: rgba(60,225,181,0.1); color: var(--accent-teal); }
+.chg-down { background: rgba(255,90,122,0.1); color: var(--accent-red); }
+.progress-bar { height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.progress-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent-blue), var(--accent-teal)); animation: barGrow 1s ease both; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-5); }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--sp-4); }
+.flex-1 { flex: 1; }
+.rp-section { border-bottom: 1px solid var(--border); padding-bottom: var(--sp-5); }
+.rp-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: var(--sp-4); }
+.statusbar {
+  height: 28px; background: rgba(6,12,24,0.8); border-top: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 var(--sp-6); gap: var(--sp-6);
+  font-size: 11px; color: var(--text-muted); flex-shrink: 0;
+  font-family: 'DM Mono', monospace;
+}
+.status-item { display: flex; align-items: center; gap: 4px; }
+.status-dot { width: 5px; height: 5px; border-radius: 50%; }
+.tooltip { position: relative; }
+.tooltip::after {
+  content: attr(data-tip);
+  position: absolute; bottom: 110%; left: 50%; transform: translateX(-50%);
+  background: rgba(14,22,40,0.95); border: 1px solid var(--border);
+  padding: 4px 10px; border-radius: var(--r-sm); font-size: 12px; white-space: nowrap;
+  pointer-events: none; opacity: 0; transition: opacity 0.15s ease;
+  font-family: 'DM Sans', sans-serif;
+}
+.tooltip:hover::after { opacity: 1; }
+@keyframes typing {
+  0%, 100% { opacity: 0.3; } 50% { opacity: 1; }
+}
+.typing-dot { animation: typing 1.2s infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+.chart-label-row { display: flex; justify-content: space-between; padding: var(--sp-2) 0; }
+.chart-label-item { font-size: 11px; color: var(--text-muted); font-family: 'DM Mono', monospace; }
+.research-block {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: var(--sp-6); margin-bottom: var(--sp-4);
+}
+.research-query {
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-4) var(--sp-5);
+  font-size: 15px; color: var(--text-primary); margin-bottom: var(--sp-5);
+  font-style: italic; line-height: 1.5;
+}
+.settings-group { margin-bottom: var(--sp-8); }
+.settings-group-title { font-size: 16px; font-weight: 600; margin-bottom: var(--sp-5); padding-bottom: var(--sp-4); border-bottom: 1px solid var(--border); }
+.setting-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--sp-4) 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.setting-info { flex: 1; }
+.setting-name { font-size: 14px; font-weight: 500; color: var(--text-primary); }
+.setting-desc { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.toggle {
+  width: 44px; height: 24px; background: rgba(255,255,255,0.08);
+  border-radius: 12px; cursor: pointer; position: relative; transition: all 0.2s ease;
+  border: 1px solid var(--border); flex-shrink: 0;
+}
+.toggle.on { background: var(--accent-blue); border-color: var(--accent-blue); }
+.toggle::after {
+  content: ''; position: absolute; width: 18px; height: 18px;
+  background: white; border-radius: 50%; top: 2px; left: 2px; transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.toggle.on::after { left: calc(100% - 20px); }
+.api-key-row {
+  display: flex; align-items: center; gap: var(--sp-4);
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--r-md); padding: var(--sp-3) var(--sp-4);
+}
+.api-key-val { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--text-muted); flex: 1; }
+.api-key-status { width: 8px; height: 8px; background: var(--accent-teal); border-radius: 50%; }
+@media (max-width: 1200px) {
+  .right-panel { display: none; }
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 900px) {
+  body { overflow: auto; }
+  #app, #main-app { height: auto; min-height: 100vh; }
+  .app-body { flex-direction: column; }
+  .sidebar { width: 100%; min-width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
+  .grid-2, .grid-3, .metric-grid { grid-template-columns: 1fr; }
+  .landing-stats, .landing-cta, .page-header, .topbar { flex-wrap: wrap; }
+  .topbar-search { order: 3; max-width: none; width: 100%; }
+  .page { padding: var(--sp-5); }
+}
+</style>
+</head>
+<body>
+<div id="app">
+<div id="screen-landing" class="screen active">
+  <div class="landing-grid"></div>
+  <div class="landing-content">
+    <div class="raphi-logo-mark">R</div>
+    <span class="landing-badge">Institutional-Grade AI · 47 Active Agents</span>
+    <h1 class="h1 landing-title">The intelligence layer for<br><em>serious investors</em></h1>
+    <p class="landing-sub">RAPHI synthesizes market data, news, quantitative signals, and explainable AI into unified decision intelligence — built for hedge funds, analysts, and portfolio managers.</p>
+    <div class="landing-cta">
+      <button class="btn-primary" onclick="showScreen('login')">Request Access →</button>
+      <button class="btn-ghost" onclick="showScreen('login')">Watch Demo</button>
+    </div>
+    <div class="landing-stats">
+      <div class="stat-item"><span class="stat-num">$2.4T</span><span class="stat-label">AUM Monitored</span></div>
+      <div class="stat-item"><span class="stat-num">99.97%</span><span class="stat-label">Uptime SLA</span></div>
+      <div class="stat-item"><span class="stat-num">4.2ms</span><span class="stat-label">Signal Latency</span></div>
+      <div class="stat-item"><span class="stat-num">847</span><span class="stat-label">Models Running</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="screen-login" class="screen">
+  <div class="login-panel">
+    <div class="login-logo">
+      <div class="login-logo-mark">R</div>
+      <span class="login-brand">RAPHI</span>
+      <span style="flex:1"></span>
+      <span class="badge badge-teal">Institutional</span>
+    </div>
+    <h2 class="h3" style="margin-bottom: 8px;">Sign in to your workspace</h2>
+    <p class="small" style="color: var(--text-muted); margin-bottom: 28px;">Secure access to your investment intelligence platform</p>
+    <div class="login-form">
+      <div class="form-group">
+        <label class="form-label">Institutional Email</label>
+        <input class="form-input" type="email" placeholder="analyst@fund.com">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" type="password" placeholder="••••••••••••">
+      </div>
+      <button class="btn-primary" style="width:100%; margin-top: 8px;" onclick="showScreen('onboarding')">Continue →</button>
+      <div class="login-divider">or</div>
+      <button class="btn-ghost" style="width:100%; display:flex; align-items:center; justify-content:center; gap:8px;" onclick="showScreen('onboarding')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+        SSO / SAML Login
+      </button>
+    </div>
+    <p class="small" style="color: var(--text-muted); text-align: center; margin-top: 20px;">Protected by enterprise-grade encryption. SOC 2 Type II certified.</p>
+  </div>
+</div>
+
+<div id="screen-onboarding" class="screen" style="flex-direction:column; overflow-y:auto;">
+  <div class="onboarding-header">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <div class="login-logo-mark" style="width:32px;height:32px;font-size:13px;">R</div>
+      <span style="font-weight:600;">RAPHI Setup</span>
+    </div>
+    <div class="onboarding-steps">
+      <div class="step-dot done"></div>
+      <div class="step-dot done"></div>
+      <div class="step-dot active"></div>
+      <div class="step-dot"></div>
+      <div class="step-dot"></div>
+    </div>
+    <button class="btn-ghost btn-sm" onclick="launchApp()">Skip setup →</button>
+  </div>
+  <div class="onboarding-body">
+    <div>
+      <h2 class="h3" style="margin-bottom:8px;">Configure your intelligence profile</h2>
+      <p class="small" style="color:var(--text-muted);">RAPHI customizes signal weighting and model selection based on your investment mandate.</p>
+    </div>
+    <div>
+      <p class="label" style="margin-bottom:12px;">Investment Focus</p>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+        <div class="ob-card selected">
+          <div class="ob-card-header">
+            <div class="ob-icon" style="background:rgba(90,169,255,0.1);">📈</div>
+            <div><div style="font-weight:600;font-size:14px;">Equity Long/Short</div><div style="font-size:12px;color:var(--text-muted);">Alpha generation via factor models</div></div>
+          </div>
+        </div>
+        <div class="ob-card">
+          <div class="ob-card-header">
+            <div class="ob-icon" style="background:rgba(60,225,181,0.1);">🏛️</div>
+            <div><div style="font-weight:600;font-size:14px;">Macro / Global</div><div style="font-size:12px;color:var(--text-muted);">Cross-asset regime detection</div></div>
+          </div>
+        </div>
+        <div class="ob-card">
+          <div class="ob-card-header">
+            <div class="ob-icon" style="background:rgba(255,180,84,0.1);">⚡</div>
+            <div><div style="font-weight:600;font-size:14px;">Quant / Systematic</div><div style="font-size:12px;color:var(--text-muted);">High-frequency signal processing</div></div>
+          </div>
+        </div>
+        <div class="ob-card">
+          <div class="ob-card-header">
+            <div class="ob-icon" style="background:rgba(167,139,250,0.1);">🎯</div>
+            <div><div style="font-weight:600;font-size:14px;">Credit / Fixed Income</div><div style="font-size:12px;color:var(--text-muted);">Spread analysis and default modeling</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <p class="label" style="margin-bottom:12px;">Risk Tolerance</p>
+      <div style="display:flex; gap:8px;">
+        <div class="ob-card" style="flex:1; padding:14px; cursor:pointer;"><div style="font-weight:600;font-size:13px;text-align:center;">Conservative</div></div>
+        <div class="ob-card selected" style="flex:1; padding:14px; cursor:pointer;"><div style="font-weight:600;font-size:13px;text-align:center; color:var(--accent-blue);">Moderate</div></div>
+        <div class="ob-card" style="flex:1; padding:14px; cursor:pointer;"><div style="font-weight:600;font-size:13px;text-align:center;">Aggressive</div></div>
+      </div>
+    </div>
+    <button class="btn-primary" style="width:100%;" onclick="launchApp()">Launch RAPHI →</button>
+  </div>
+</div>
+
+<div id="main-app">
+  <div class="topbar">
+    <div class="topbar-logo">
+      <div class="topbar-logomark">R</div>
+      <span class="topbar-name">RAPHI</span>
+      <span class="topbar-version">v2.4</span>
+    </div>
+    <div class="topbar-search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" placeholder="Search tickers, events, signals...">
+      <span class="search-hint">⌘K</span>
+    </div>
+    <div class="topbar-actions">
+      <div class="market-chip"><span class="dot"></span><span>NYSE</span><span class="val">LIVE</span></div>
+      <div class="topbar-btn tooltip" data-tip="Alerts" onclick="switchPage('alerts')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span class="notif-dot"></span>
+      </div>
+      <div class="topbar-btn tooltip" data-tip="Settings" onclick="switchPage('settings')">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 0-14.14 0M4.93 19.07a10 10 0 0 0 14.14 0"/><path d="M2 12h2M20 12h2M12 2v2M12 20v2"/></svg>
+      </div>
+      <div class="avatar">AK</div>
+    </div>
+  </div>
+
+  <div class="app-body">
+    <nav class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Intelligence</div>
+        <div class="nav-item active" onclick="switchPage('dashboard')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
+          Dashboard
+        </div>
+        <div class="nav-item" onclick="switchPage('ask')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+          Ask RAPHI
+          <span class="nav-badge blue">AI</span>
+        </div>
+        <div class="nav-item" onclick="switchPage('stock')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg></span>
+          Stock Analysis
+        </div>
+        <div class="nav-item" onclick="switchPage('signals')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          Market Signals
+          <span class="nav-badge teal">12</span>
+        </div>
+        <div class="nav-item" onclick="switchPage('news')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 0-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/></svg></span>
+          News & Sentiment
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Portfolio</div>
+        <div class="nav-item" onclick="switchPage('portfolio')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg></span>
+          Portfolio Risk
+        </div>
+        <div class="nav-item" onclick="switchPage('shap')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></span>
+          Explainability
+        </div>
+        <div class="nav-item" onclick="switchPage('memo')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>
+          Decision Memo
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Tools</div>
+        <div class="nav-item" onclick="switchPage('research')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>
+          Research Workspace
+        </div>
+        <div class="nav-item" onclick="switchPage('alerts')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
+          Alerts Center
+          <span class="nav-badge">5</span>
+        </div>
+        <div class="nav-item" onclick="switchPage('models')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg></span>
+          Model Monitoring
+        </div>
+        <div class="nav-item" onclick="switchPage('settings')">
+          <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 0-14.14 0M4.93 19.07a10 10 0 0 0 14.14 0"/></svg></span>
+          Settings & API
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="agent-status">
+          <div class="agent-pulse"></div>
+          <div class="agent-info">
+            <div class="agent-label">47 Agents Active</div>
+            <div class="agent-sub">LangGraph · ChromaDB · RAG</div>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <div class="main-content" id="mainContent">
+      <div id="page-dashboard" class="page active">
+        <div class="page-header">
+          <div class="page-title">
+            <h1 class="h3">Market Intelligence</h1>
+            <p class="small" style="color:var(--text-muted);">Friday, March 6, 2026 · NYSE Open · Last refresh 4s ago</p>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn-ghost btn-sm">Export Report</button>
+            <button class="btn-primary btn-sm">+ Add Widget</button>
+          </div>
+        </div>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-label">Portfolio Alpha</div>
+            <div class="metric-value" style="color:var(--accent-teal)">+12.4%</div>
+            <div class="metric-change up">▲ +1.8% vs benchmark</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Active Signals</div>
+            <div class="metric-value">34</div>
+            <div class="metric-change up">▲ 8 new today</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Portfolio VaR (95%)</div>
+            <div class="metric-value" style="color:var(--accent-warn)">$1.2M</div>
+            <div class="metric-change down">▼ +$140K from yesterday</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Model Accuracy</div>
+            <div class="metric-value">87.3%</div>
+            <div class="metric-change up">▲ +2.1% 30-day</div>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-bottom:20px;">
+          <div class="card glow">
+            <div class="card-header">
+              <span class="card-title">NVDA Price + Forecast</span>
+              <div style="display:flex;gap:8px;"><span class="badge badge-teal">BULLISH</span><span class="card-meta">1D · 15m</span></div>
+            </div>
+            <div style="height:200px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.01);border-radius:10px;">
+              <div class="small" style="color:var(--text-muted);">Inline SVG price chart placeholder</div>
+            </div>
+          </div>
+          <div class="card glow">
+            <div class="card-header"><span class="card-title">Top Signals</span><span class="badge badge-blue">Live</span></div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div class="signal-card bullish">
+                <div class="signal-header"><span class="signal-ticker">NVDA</span><span class="badge badge-teal">LONG</span></div>
+                <div class="signal-price" style="color:var(--accent-teal)">$887.40 <span style="font-size:14px;font-weight:400">▲ 3.2%</span></div>
+                <div class="signal-meta"><div class="confidence-bar"><div class="confidence-fill" style="width:88%"></div></div><span class="small" style="color:var(--text-muted)">88% conf.</span></div>
+              </div>
+              <div class="signal-card">
+                <div class="signal-header"><span class="signal-ticker">MSFT</span><span class="badge badge-blue">HOLD</span></div>
+                <div class="signal-price">$412.30 <span style="font-size:14px;font-weight:400;color:var(--text-muted)">▲ 0.8%</span></div>
+                <div class="signal-meta"><div class="confidence-bar"><div class="confidence-fill" style="width:72%"></div></div><span class="small" style="color:var(--text-muted)">72% conf.</span></div>
+              </div>
+              <div class="signal-card bearish">
+                <div class="signal-header"><span class="signal-ticker">META</span><span class="badge badge-red">SHORT</span></div>
+                <div class="signal-price" style="color:var(--accent-red)">$582.10 <span style="font-size:14px;font-weight:400">▼ 1.4%</span></div>
+                <div class="signal-meta"><div class="confidence-bar"><div class="confidence-fill" style="width:64%;background:linear-gradient(90deg,var(--accent-red),#E03060)"></div></div><span class="small" style="color:var(--text-muted)">64% conf.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="page-ask" class="page">
+        <div class="page-header">
+          <div class="page-title">
+            <h1 class="h3">Ask RAPHI</h1>
+            <p class="small" style="color:var(--text-muted);">Multi-agent AI console · LangGraph orchestration · DeepSeek-R1 reasoning</p>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;"><span class="badge badge-teal">47 Agents Ready</span><button class="btn-outline btn-sm">New Thread</button></div>
+        </div>
+        <div class="console-area">
+          <div class="console-messages" id="consoleMessages">
+            <div style="text-align:center;padding:20px 0;">
+              <div style="width:48px;height:48px;background:linear-gradient(135deg,var(--accent-blue),var(--accent-teal));border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-family:'DM Mono';font-size:18px;color:var(--bg-primary);margin-bottom:12px;">R</div>
+              <div class="h4" style="margin-bottom:6px;">RAPHI Intelligence Console</div>
+              <p class="small" style="color:var(--text-muted);">Ask me anything about markets, positions, risks, or signals.</p>
+            </div>
+            <div class="msg-user">Should we increase exposure to NVDA given current macro conditions?</div>
+            <div class="msg-ai">
+              <div class="msg-ai-header"><div class="ai-avatar">R</div><span style="font-size:13px;font-weight:600;">RAPHI</span><span class="small" style="color:var(--text-muted);">· Multi-agent analysis · 3.2s</span></div>
+              <div class="response-card">
+                <div class="response-section" style="background:rgba(60,225,181,0.04);">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+                    <div>
+                      <div class="label" style="margin-bottom:4px;">Recommendation</div>
+                      <div style="font-size:22px;font-weight:700;color:var(--accent-teal);">INCREASE POSITION</div>
+                      <div class="small" style="color:var(--text-muted);margin-top:2px;">+15% allocation suggested · Target $920</div>
+                    </div>
+                    <div class="conf-ring">
+                      <svg width="80" height="80" viewBox="0 0 80 80">
+                        <circle class="ring-bg" cx="40" cy="40" r="34"/>
+                        <circle class="ring-fill" cx="40" cy="40" r="34" stroke="#3CE1B5" stroke-dasharray="213.6" stroke-dashoffset="25.6"/>
+                      </svg>
+                      <div class="ring-text" style="color:var(--accent-teal);font-size:14px;">88%</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="response-section">
+                  <div class="label" style="margin-bottom:12px;">Key Drivers</div>
+                  <div class="shap-row"><span class="shap-label">AI Chip Demand</span><div class="shap-bar-track"><div class="shap-bar-fill shap-pos" style="width:92%"></div></div><span class="shap-val" style="color:var(--accent-teal)">+0.92</span></div>
+                  <div class="shap-row"><span class="shap-label">Revenue Beat Q4</span><div class="shap-bar-track"><div class="shap-bar-fill shap-pos" style="width:78%"></div></div><span class="shap-val" style="color:var(--accent-teal)">+0.78</span></div>
+                  <div class="shap-row"><span class="shap-label">LSTM Momentum</span><div class="shap-bar-track"><div class="shap-bar-fill shap-pos" style="width:65%"></div></div><span class="shap-val" style="color:var(--accent-teal)">+0.65</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="console-input-row">
+            <textarea class="console-input" placeholder="Ask about any ticker, macro event, signal, or portfolio risk..." rows="2"></textarea>
+            <button class="console-send" onclick="sendConsoleMsg()">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m22 2-7 20-4-9-9-4 20-7z"/><path d="M22 2 11 13"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="page-stock" class="page"><div class="page-header"><div class="page-title"><div style="display:flex;align-items:center;gap:12px;"><h1 class="h3">NVDA</h1><span class="badge badge-teal">BULLISH</span><span class="mono" style="font-size:22px;font-weight:700;color:var(--accent-teal)">$887.40 ▲3.2%</span></div><p class="small" style="color:var(--text-muted);">NVIDIA Corporation · NASDAQ · AI/Semiconductors · $2.17T Market Cap</p></div><div style="display:flex;gap:8px;"><button class="btn-teal btn-sm">Add to Portfolio</button><button class="btn-primary btn-sm">Generate Memo</button></div></div><div class="card"><div class="card-title">Stock analysis view scaffolded from your mockup</div></div></div>
+      <div id="page-portfolio" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Portfolio Risk Monitor</h1><p class="small" style="color:var(--text-muted)">Real-time VaR · Correlation · Exposure analysis</p></div></div><div class="card"><div class="card-title">Portfolio risk view scaffolded</div></div></div>
+      <div id="page-shap" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Explainability Engine</h1><p class="small" style="color:var(--text-muted)">SHAP-driven factor analysis</p></div></div><div class="card"><div class="card-title">Explainability view scaffolded</div></div></div>
+      <div id="page-signals" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Market Signals</h1><p class="small" style="color:var(--text-muted)">12 active signals</p></div></div><div class="grid-3"><div class="signal-card bullish"><div class="signal-header"><span class="signal-ticker">NVDA</span><span class="badge badge-teal">LONG</span></div><div class="signal-price" style="color:var(--accent-teal)">$887.40</div></div><div class="signal-card bearish"><div class="signal-header"><span class="signal-ticker">META</span><span class="badge badge-red">SHORT</span></div><div class="signal-price" style="color:var(--accent-red)">$582.10</div></div><div class="signal-card"><div class="signal-header"><span class="signal-ticker">GLD</span><span class="badge badge-warn">HEDGE</span></div><div class="signal-price">$228.60</div></div></div></div>
+      <div id="page-news" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">News & Sentiment</h1><p class="small" style="color:var(--text-muted)">Real-time NLP pipeline</p></div></div><div class="news-card"><div class="news-img" style="background:linear-gradient(135deg,#1a3a6b,#0e2040);display:flex;align-items:center;justify-content:center;font-size:24px;">📰</div><div class="news-body"><div class="news-title">NVIDIA Reports Record Q4 Revenue of $39.3B</div><div class="news-meta"><span class="sentiment-chip sentiment-pos">● Bullish</span><span class="small" style="color:var(--text-muted)">Bloomberg · 2h ago</span></div></div></div></div>
+      <div id="page-memo" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">AI Decision Memo</h1><p class="small" style="color:var(--text-muted)">NVDA · Generated by RAPHI</p></div></div><div class="memo-block"><div class="memo-section-title">Executive Summary</div><div class="memo-text">RAPHI recommends increasing NVDA exposure by 15% to 32% of portfolio weighting.</div></div></div>
+      <div id="page-alerts" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Alerts Center</h1><p class="small" style="color:var(--text-muted)">5 active alerts</p></div></div><div class="alert-row"><div class="alert-icon" style="background:rgba(255,90,122,0.12);">🔴</div><div class="alert-body"><div class="alert-title">NVDA VaR Breach</div><div class="alert-sub">Portfolio · Risk Engine · Triggered 12 minutes ago</div></div><span class="badge badge-red">CRITICAL</span><span class="alert-time">09:30</span></div></div>
+      <div id="page-models" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Model Monitoring</h1><p class="small" style="color:var(--text-muted)">Live performance tracking</p></div></div><div class="card"><div class="card-title">Model monitoring view scaffolded</div></div></div>
+      <div id="page-research" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Research Workspace</h1><p class="small" style="color:var(--text-muted)">Collaborative AI-augmented research</p></div></div><div class="research-block"><div style="font-weight:600;margin-bottom:12px;">NVDA — AI Chip Dominance Thesis</div><div class="research-query">"What are the key risks to NVIDIA's AI chip market dominance over the next 24 months, and how should they affect our position sizing?"</div></div></div>
+      <div id="page-settings" class="page"><div class="page-header"><div class="page-title"><h1 class="h3">Settings & Integrations</h1><p class="small" style="color:var(--text-muted)">Platform configuration · API keys · Data sources</p></div></div><div class="grid-2"><div class="settings-group"><div class="settings-group-title">Data Sources</div><div class="setting-row"><div class="setting-info"><div class="setting-name">Bloomberg Terminal API</div><div class="setting-desc">Real-time market data and news</div></div><div class="toggle on" onclick="this.classList.toggle('on')"></div></div></div><div class="settings-group"><div class="settings-group-title">API Keys</div><div class="api-key-row"><div class="api-key-status"></div><span class="api-key-val">rph_live_••••••••••••••••••••3f8a</span></div></div></div></div>
+    </div>
+
+    <div class="right-panel" id="rightPanel">
+      <div class="rp-section">
+        <div class="rp-title">Market Status</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;justify-content:space-between;"><span class="small" style="color:var(--text-muted)">S&P 500</span><span class="small" style="color:var(--accent-teal);font-family:'DM Mono'">5,848 ▲0.6%</span></div>
+          <div style="display:flex;justify-content:space-between;"><span class="small" style="color:var(--text-muted)">NASDAQ</span><span class="small" style="color:var(--accent-teal);font-family:'DM Mono'">19,224 ▲0.9%</span></div>
+          <div style="display:flex;justify-content:space-between;"><span class="small" style="color:var(--text-muted)">10Y Yield</span><span class="small" style="color:var(--accent-warn);font-family:'DM Mono'">4.42% ▲</span></div>
+        </div>
+      </div>
+      <div class="rp-section">
+        <div class="rp-title">Quick Watchlist</div>
+        <div class="watchlist-item"><span class="watchlist-ticker">NVDA</span><span class="watchlist-name">NVIDIA</span><span class="watchlist-price">$887.40</span><span class="watchlist-chg chg-up">+3.2%</span></div>
+        <div class="watchlist-item"><span class="watchlist-ticker">AAPL</span><span class="watchlist-name">Apple</span><span class="watchlist-price">$202.80</span><span class="watchlist-chg chg-up">+0.8%</span></div>
+      </div>
+      <div>
+        <div class="rp-title">Portfolio Health</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div><div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span class="small" style="color:var(--text-muted)">Diversification</span><span class="small">Good</span></div><div class="progress-bar"><div class="progress-fill" style="width:72%"></div></div></div>
+          <div><div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span class="small" style="color:var(--text-muted)">Risk Utilization</span><span class="small" style="color:var(--accent-warn)">84%</span></div><div class="progress-bar"><div class="progress-fill" style="width:84%;background:linear-gradient(90deg,var(--accent-warn),#E09030)"></div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="status-item"><div class="status-dot" style="background:var(--accent-teal)"></div>SYSTEM OK</div>
+    <div class="status-item"><div class="status-dot" style="background:var(--accent-teal)"></div>LangGraph: 47 agents active</div>
+    <div class="status-item"><div class="status-dot" style="background:var(--accent-blue)"></div>ChromaDB: 2.4M vectors</div>
+    <div class="status-item"><div class="status-dot" style="background:var(--accent-teal)"></div>RAG Pipeline: Running</div>
+    <div class="status-item"><div class="status-dot" style="background:var(--accent-blue)"></div>Triton: 4.2ms avg</div>
+    <div style="margin-left:auto" class="status-item">NYSE OPEN · 09:42:18 EST</div>
+  </div>
+</div>
+</div>
+
+<script>
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach((screen) => screen.classList.remove('active'));
+  const el = document.getElementById('screen-' + id);
+  if (el) el.classList.add('active');
+}
+
+function launchApp() {
+  document.querySelectorAll('.screen').forEach((screen) => screen.classList.remove('active'));
+  const app = document.getElementById('main-app');
+  if (app) app.classList.add('active');
+}
+
+function switchPage(id) {
+  document.querySelectorAll('.nav-item').forEach((item) => item.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach((item) => {
+    if ((item.getAttribute('onclick') || '').includes(id)) item.classList.add('active');
+  });
+
+  document.querySelectorAll('.page').forEach((page) => page.classList.remove('active'));
+  const page = document.getElementById('page-' + id);
+  if (page) page.classList.add('active');
+}
+
+function sendConsoleMsg() {
+  const input = document.querySelector('.console-input');
+  const val = input ? input.value.trim() : '';
+  if (!val) return;
+
+  const messages = document.getElementById('consoleMessages');
+  if (!messages) return;
+
+  const userMsg = document.createElement('div');
+  userMsg.className = 'msg-user';
+  userMsg.textContent = val;
+  messages.appendChild(userMsg);
+  input.value = '';
+
+  const typing = document.createElement('div');
+  typing.className = 'msg-ai';
+  typing.innerHTML = '<div class="msg-ai-header"><div class="ai-avatar">R</div><span style="font-size:13px;font-weight:600;">RAPHI</span><span class="small" style="color:var(--text-muted);">· Analyzing...</span></div><div style="display:flex;gap:4px;padding:12px;background:var(--bg-card);border-radius:8px;width:60px;"><div class="typing-dot" style="width:6px;height:6px;background:var(--accent-blue);border-radius:50%"></div><div class="typing-dot" style="width:6px;height:6px;background:var(--accent-blue);border-radius:50%"></div><div class="typing-dot" style="width:6px;height:6px;background:var(--accent-blue);border-radius:50%"></div></div>';
+  messages.appendChild(typing);
+  messages.scrollTop = messages.scrollHeight;
+
+  setTimeout(() => {
+    typing.remove();
+    const aiMsg = document.createElement('div');
+    aiMsg.className = 'msg-ai';
+    aiMsg.innerHTML = '<div class="msg-ai-header"><div class="ai-avatar">R</div><span style="font-size:13px;font-weight:600;">RAPHI</span><span class="small" style="color:var(--text-muted);">· Analysis complete · 2.8s</span></div><div class="response-card"><div class="response-section"><div class="label" style="margin-bottom:8px;">Response</div><div class="small" style="color:var(--text-secondary);line-height:1.7;">Based on current market conditions and RAPHI\'s multi-agent analysis, I\'ve processed your query across 23 data sources and 847 relevant documents in the vector store. The ensemble model consensus suggests a high-confidence directional signal. Would you like me to generate a full decision memo?</div></div><div class="response-section"><div style="display:flex;gap:8px;"><button class="btn-primary btn-sm" onclick="switchPage(\'memo\')">Generate Memo</button><button class="btn-ghost btn-sm" onclick="switchPage(\'shap\')">View SHAP</button></div></div></div>';
+    messages.appendChild(aiMsg);
+    messages.scrollTop = messages.scrollHeight;
+  }, 2000);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.ob-card').forEach((card) => {
+    card.addEventListener('click', function () {
+      const parent = this.parentElement;
+      if (!parent) return;
+      parent.querySelectorAll('.ob-card').forEach((item) => item.classList.remove('selected'));
+      this.classList.add('selected');
+    });
+  });
+
+  const input = document.querySelector('.console-input');
+  if (input) {
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendConsoleMsg();
+      }
+    });
+  }
+});
+
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  const clocks = document.querySelectorAll('.status-item:last-child');
+  clocks.forEach((clock) => {
+    if (clock.textContent.includes('EST')) {
+      clock.textContent = `NYSE OPEN · ${h}:${m}:${s} EST`;
+    }
+  });
+}
+setInterval(updateClock, 1000);
+</script>
+</body>
+</html>

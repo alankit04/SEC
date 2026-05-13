@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "RAPHI FastAPI Backend",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/Users/alan/Desktop/SEC Data/server.js"],
+      "port": 8000
+    },
+    {
+      "name": "RAPHI A2A Server",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/Users/alan/Desktop/SEC Data/a2a_server.js"],
+      "port": 9999
+    }
+  ]
+}

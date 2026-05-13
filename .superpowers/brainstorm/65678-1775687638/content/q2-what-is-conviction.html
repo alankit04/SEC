@@ -1,0 +1,63 @@
+<h2>What counts as a "conviction"?</h2>
+<p class="subtitle">The Conviction Ledger needs to know what it's tracking. Every entry is a timestamped claim RAPHI makes — that later gets checked against reality. Which outputs should be tracked?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>ML Signal Only</h3>
+      <p>Track only the quantitative signal direction: LONG / SHORT / HOLD, with raw probability.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.82rem; line-height: 1.6;">
+        📌 Apr 8, 2026 — NVDA — LONG (prob: 0.71)<br>
+        ⏱ Check at: May 8 · Jun 7 · Jul 7<br>
+        ✅ May 8: +8.4% — <span style="color:#4ade80">CONFIRMED</span>
+      </div>
+      <br>
+      <p><strong>Why this first:</strong> Cleanest definition of "proved true" — price went in the signal direction. Fully automatable. No ambiguity.</p>
+      <p><strong>Limit:</strong> Only covers one of the four agent outputs.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>ML Signal + SEC Trend Verdict</h3>
+      <p>Track the quantitative signal AND the SEC revenue trend call the sec-researcher makes.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.82rem; line-height: 1.6;">
+        📌 Apr 8, 2026 — NVDA<br>
+        &nbsp;&nbsp;ML: LONG (0.71) → check vs price at 30/60/90d<br>
+        &nbsp;&nbsp;SEC: Revenue accelerating → check vs next 10-Q filing<br>
+        ✅ May 8: ML confirmed · 📋 Jul 15: Next 10-Q pending
+      </div>
+      <br>
+      <p><strong>Why this:</strong> SEC verdict is verifiable — next quarter's XBRL filing either confirms or contradicts "accelerating." Two independent signals, two independent accuracy scores.</p>
+      <p><strong>Limit:</strong> SEC lookback is 90–120 days (filing cadence). Slower feedback loop.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>All Research Outputs</h3>
+      <p>Track everything RAPHI produces: ML signal, SEC trend, news sentiment call, and the final Signal View (Positive/Negative/Neutral) on every memo.</p>
+      <br>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.82rem; line-height: 1.6;">
+        📌 Apr 8, 2026 — NVDA — Signal View: Positive<br>
+        &nbsp;&nbsp;ML: LONG (0.71) · SEC: Accelerating<br>
+        &nbsp;&nbsp;Sentiment: Positive (VADER: +0.42)<br>
+        ⏱ 30d · 60d · 90d lookback for each component<br>
+        📊 Accuracy by component · by regime · by sector
+      </div>
+      <br>
+      <p><strong>Why this:</strong> Maximum insight. Shows which component of RAPHI is most reliable — and when. Enables "trust ML signals more than sentiment in high-VIX environments."</p>
+      <p><strong>Limit:</strong> Most complex to build. "Proved true" for sentiment is harder to define than for price direction.</p>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top: 1.5rem; padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">My recommendation</p>
+  <p style="margin-top: 0.5rem;"><strong>B</strong> — ML Signal + SEC Trend. Gives two independent, verifiable accuracy scores from day one. ML signal is price-checkable in 30 days. SEC verdict is filing-checkable in 90 days. Both are fully automatable with the current data stack. C is the right end-state but A is too narrow and C needs "proved true" definitions that require more design work upfront.</p>
+</div>

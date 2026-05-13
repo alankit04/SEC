@@ -1,0 +1,64 @@
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ──────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── CRITICAL: Secrets — never commit these ──────────────────────────
+.env
+.env.*
+*.env
+settings.json          # contains watchlist — API key removed but still private
+secrets.json
+credentials.json
+
+# ── RAPHI runtime data ───────────────────────────────────────────────
+# sessions.json, audit log, rate limits — sensitive
+.raphi_audit/
+# durable local graph-memory fallback
+.raphi_memory/
+# audit trail files
+*.jsonl
+# project-local Docker volumes (Neo4j data/logs)
+.docker/
+
+# ── Claude Code ─────────────────────────────────────────────────────
+.claude/agent-memory/  # session summaries may contain signal history
+
+# ── Data files (large) ──────────────────────────────────────────────
+*.parquet
+*.feather
+*.pkl
+*.joblib
+data/
+raw_data/
+dashboard_data.js
+
+# ── macOS ────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/worktrees/
+
+# Local frontend/build artifacts
+docs/landing/node_modules/
+docs/landing/.next/
+
+# Neo4j logs
+.docker/neo4j/logs/

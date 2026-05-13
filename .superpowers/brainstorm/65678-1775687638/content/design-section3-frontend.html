@@ -1,0 +1,528 @@
+<h2>Design · Section 3 of 4</h2>
+<p class="subtitle">Frontend — one new page, inline compact view, four JS functions, three new DOM regions</p>
+
+<!-- ================================================================
+     SECTION A: PAGE STRUCTURE OVERVIEW
+     ================================================================ -->
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.5rem; border-top: 3px solid #7c6cf0;">
+  <p class="label" style="color: #7c6cf0; margin-bottom: 0.75rem;">New sidebar nav item — "Conviction Ledger"</p>
+  <p style="font-size: 0.82rem; margin-bottom: 0.75rem;">Added to the Portfolio section of the sidebar (after Decision Memo). Uses a scale/target icon to convey accountability. Badge shows pending resolution count from the last <code>liveRefresh()</code> call.</p>
+  <div style="background: rgba(0,0,0,0.25); border-radius: 8px; padding: 0.85rem; font-family: monospace; font-size: 0.78rem; line-height: 1.8; color: #94a3b8;">
+    <span style="color: #7c6cf0;">&lt;!-- sidebar, Portfolio section --&gt;</span><br>
+    &lt;div class="nav-item" onclick="switchPage('convictions')"&gt;<br>
+    &nbsp;&nbsp;&lt;span class="nav-icon"&gt;[scale SVG]&lt;/span&gt;<br>
+    &nbsp;&nbsp;Conviction Ledger<br>
+    &nbsp;&nbsp;&lt;span class="nav-badge" id="nav-pending-count" style="display:none;"&gt;—&lt;/span&gt;<br>
+    &lt;/div&gt;
+  </div>
+  <p style="font-size: 0.8rem; color: #94a3b8; margin-top: 0.6rem;">The badge ID <code>nav-pending-count</code> is written by <code>loadConvictionStats()</code> on every liveRefresh cycle. It is hidden when pending count is zero.</p>
+</div>
+
+<!-- ================================================================
+     SECTION B: MOCKUP — THE CONVICTION LEDGER PAGE
+     ================================================================ -->
+<h3 style="margin: 1.5rem 0 0.75rem; font-size: 1rem; font-weight: 600;">Conviction Ledger page — full mockup</h3>
+
+<div class="mockup" style="background: #060C18; border-radius: 12px; border: 1px solid rgba(90,169,255,0.15); overflow: hidden; margin-bottom: 1.5rem;">
+
+  <!-- Page header -->
+  <div class="mockup-header" style="padding: 1.25rem 1.5rem; border-bottom: 1px solid rgba(90,169,255,0.1); display: flex; align-items: flex-start; justify-content: space-between;">
+    <div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c6cf0" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        <span style="font-size: 1.05rem; font-weight: 600; color: #E8F0FF;">Conviction Ledger</span>
+      </div>
+      <p class="subtitle" style="font-size: 0.78rem; color: #8FA6C9;">Every research output RAPHI has made — compared to what actually happened</p>
+    </div>
+    <div style="display: flex; gap: 0.5rem; align-items: center;">
+      <select style="background: #111D34; border: 1px solid rgba(90,169,255,0.15); border-radius: 6px; color: #8FA6C9; font-size: 0.78rem; padding: 6px 10px; cursor: pointer;">
+        <option>All Tickers</option>
+        <option>NVDA</option>
+        <option>AAPL</option>
+        <option>MSFT</option>
+      </select>
+      <select style="background: #111D34; border: 1px solid rgba(90,169,255,0.15); border-radius: 6px; color: #8FA6C9; font-size: 0.78rem; padding: 6px 10px; cursor: pointer;">
+        <option>All Signal Types</option>
+        <option>ML Signal</option>
+        <option>SEC Trend</option>
+        <option>Signal View</option>
+      </select>
+      <select style="background: #111D34; border: 1px solid rgba(90,169,255,0.15); border-radius: 6px; color: #8FA6C9; font-size: 0.78rem; padding: 6px 10px; cursor: pointer;">
+        <option>All Windows</option>
+        <option>30d</option>
+        <option>60d</option>
+        <option>90d</option>
+      </select>
+      <button style="background: rgba(90,169,255,0.08); border: 1px solid rgba(90,169,255,0.2); border-radius: 6px; color: #5AA9FF; font-size: 0.78rem; padding: 6px 12px; cursor: pointer;">↺ Refresh</button>
+    </div>
+  </div>
+
+  <div class="mockup-body" style="padding: 1.25rem 1.5rem;">
+
+    <!-- ── AGGREGATE STATS BAR ── -->
+    <div style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.75rem; margin-bottom: 1.5rem;">
+
+      <!-- ML Accuracy 30d -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(90,169,255,0.1); text-align: center;">
+        <p class="label" style="color: #4D6080; margin-bottom: 0.35rem; font-size: 0.67rem;">ML · 30d</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #4ade80; font-family: monospace; line-height: 1;">71%</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">of 28 resolved</p>
+      </div>
+
+      <!-- ML Accuracy 60d -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(90,169,255,0.1); text-align: center;">
+        <p class="label" style="color: #4D6080; margin-bottom: 0.35rem; font-size: 0.67rem;">ML · 60d</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #4ade80; font-family: monospace; line-height: 1;">68%</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">of 19 resolved</p>
+      </div>
+
+      <!-- ML Accuracy 90d -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(90,169,255,0.1); text-align: center;">
+        <p class="label" style="color: #4D6080; margin-bottom: 0.35rem; font-size: 0.67rem;">ML · 90d</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #f59e0b; font-family: monospace; line-height: 1;">61%</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">of 11 resolved</p>
+      </div>
+
+      <!-- SEC Trend Accuracy -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(90,169,255,0.1); text-align: center;">
+        <p class="label" style="color: #4D6080; margin-bottom: 0.35rem; font-size: 0.67rem;">SEC Trend</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #4ade80; font-family: monospace; line-height: 1;">74%</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">rev direction</p>
+      </div>
+
+      <!-- Signal View vs SPY -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(124,108,240,0.25); text-align: center;">
+        <p class="label" style="color: #7c6cf0; margin-bottom: 0.35rem; font-size: 0.67rem;">Signal vs SPY</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #a78bfa; font-family: monospace; line-height: 1;">+4.2%</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">avg excess ret</p>
+      </div>
+
+      <!-- Total Convictions -->
+      <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(90,169,255,0.1); text-align: center;">
+        <p class="label" style="color: #4D6080; margin-bottom: 0.35rem; font-size: 0.67rem;">Total</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #E8F0FF; font-family: monospace; line-height: 1;">47</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">all convictions</p>
+      </div>
+
+      <!-- Pending -->
+      <div style="background: rgba(255,180,84,0.06); border-radius: 8px; padding: 0.85rem 0.75rem; border: 1px solid rgba(255,180,84,0.2); text-align: center;">
+        <p class="label" style="color: #f59e0b; margin-bottom: 0.35rem; font-size: 0.67rem;">Pending</p>
+        <p style="font-size: 1.4rem; font-weight: 700; color: #f59e0b; font-family: monospace; line-height: 1;">9</p>
+        <p style="font-size: 0.67rem; color: #8FA6C9; margin-top: 0.25rem;">awaiting resolution</p>
+      </div>
+
+    </div>
+
+    <!-- ── CONVICTION HISTORY TABLE ── -->
+    <div style="background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(90,169,255,0.08); margin-bottom: 1.5rem; overflow: hidden;">
+
+      <div style="padding: 0.75rem 1rem; border-bottom: 1px solid rgba(90,169,255,0.08); display: flex; align-items: center; justify-content: space-between;">
+        <p style="font-size: 0.82rem; font-weight: 600; color: #E8F0FF;">Conviction History</p>
+        <p style="font-size: 0.75rem; color: #4D6080; font-family: monospace;">Page 1 of 1 · 47 convictions</p>
+      </div>
+
+      <table style="width: 100%; border-collapse: collapse; font-size: 0.78rem;">
+        <thead>
+          <tr style="border-bottom: 1px solid rgba(90,169,255,0.1);">
+            <th style="text-align: left; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">Date</th>
+            <th style="text-align: left; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">Ticker</th>
+            <th style="text-align: left; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">ML Signal</th>
+            <th style="text-align: left; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">SEC Rev Trend</th>
+            <th style="text-align: left; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">Signal View</th>
+            <th style="text-align: center; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">30d</th>
+            <th style="text-align: center; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">60d</th>
+            <th style="text-align: center; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">90d</th>
+            <th style="text-align: right; padding: 0.6rem 0.75rem; font-size: 0.67rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #4D6080;">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+
+          <!-- ROW 1 — Fully confirmed, bullish, all three windows correct -->
+          <tr style="border-bottom: 1px solid rgba(90,169,255,0.05);">
+            <td style="padding: 0.75rem; color: #8FA6C9; font-family: monospace; white-space: nowrap;">2026-01-08</td>
+            <td style="padding: 0.75rem;">
+              <span style="font-family: monospace; font-weight: 600; color: #E8F0FF; font-size: 0.85rem;">NVDA</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">BULLISH 87%</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">ACCELERATING</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">STRONG BUY</span>
+            </td>
+            <!-- 30d: confirmed correct -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+11.4% vs entry" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(60,225,181,0.1); color: #3CE1B5; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✓ +11.4%</span>
+            </td>
+            <!-- 60d: confirmed correct -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+18.2% vs entry" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(60,225,181,0.1); color: #3CE1B5; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✓ +18.2%</span>
+            </td>
+            <!-- 90d: confirmed correct -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+22.7% vs entry" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(60,225,181,0.1); color: #3CE1B5; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✓ +22.7%</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: right; color: #4D6080; font-size: 0.72rem;">memo</td>
+          </tr>
+
+          <!-- ROW 2 — Contradicted: bearish but stock went up -->
+          <tr style="border-bottom: 1px solid rgba(90,169,255,0.05); background: rgba(255,90,122,0.02);">
+            <td style="padding: 0.75rem; color: #8FA6C9; font-family: monospace; white-space: nowrap;">2026-01-22</td>
+            <td style="padding: 0.75rem;">
+              <span style="font-family: monospace; font-weight: 600; color: #E8F0FF; font-size: 0.85rem;">AAPL</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(255,90,122,0.1); color: #FF5A7A; border: 1px solid rgba(255,90,122,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">BEARISH 72%</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(255,90,122,0.1); color: #FF5A7A; border: 1px solid rgba(255,90,122,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">DECELERATING</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(255,90,122,0.1); color: #FF5A7A; border: 1px solid rgba(255,90,122,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">UNDERPERFORM</span>
+            </td>
+            <!-- 30d: contradicted -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+6.3% — stock rose; conviction was bearish" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(255,90,122,0.1); color: #FF5A7A; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✗ +6.3%</span>
+            </td>
+            <!-- 60d: contradicted -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+9.1% — stock rose; conviction was bearish" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(255,90,122,0.1); color: #FF5A7A; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✗ +9.1%</span>
+            </td>
+            <!-- 90d: pending -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #4D6080; font-size: 0.72rem; font-family: monospace;">due Apr 22</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: right; color: #4D6080; font-size: 0.72rem;">signal</td>
+          </tr>
+
+          <!-- ROW 3 — Mixed: ML right, SEC wrong, 30d pending -->
+          <tr style="border-bottom: 1px solid rgba(90,169,255,0.05);">
+            <td style="padding: 0.75rem; color: #8FA6C9; font-family: monospace; white-space: nowrap;">2026-02-14</td>
+            <td style="padding: 0.75rem;">
+              <span style="font-family: monospace; font-weight: 600; color: #E8F0FF; font-size: 0.85rem;">MSFT</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">BULLISH 79%</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">STABLE</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">BUY</span>
+            </td>
+            <!-- 30d: confirmed correct -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span title="+5.8% vs entry" style="display: inline-flex; align-items: center; gap: 3px; background: rgba(60,225,181,0.1); color: #3CE1B5; border-radius: 4px; padding: 2px 7px; font-family: monospace; font-size: 0.72rem; font-weight: 600;">✓ +5.8%</span>
+            </td>
+            <!-- 60d: pending -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #4D6080; font-size: 0.72rem; font-family: monospace;">due Apr 15</span>
+            </td>
+            <!-- 90d: pending -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #4D6080; font-size: 0.72rem; font-family: monospace;">due May 15</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: right; color: #4D6080; font-size: 0.72rem;">chat</td>
+          </tr>
+
+          <!-- ROW 4 — Brand new, all windows pending -->
+          <tr>
+            <td style="padding: 0.75rem; color: #8FA6C9; font-family: monospace; white-space: nowrap;">2026-03-31</td>
+            <td style="padding: 0.75rem;">
+              <span style="font-family: monospace; font-weight: 600; color: #E8F0FF; font-size: 0.85rem;">NVDA</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">BULLISH 83%</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">ACCELERATING</span>
+            </td>
+            <td style="padding: 0.75rem;">
+              <span style="background: rgba(60,225,181,0.1); color: #3CE1B5; border: 1px solid rgba(60,225,181,0.2); border-radius: 999px; padding: 2px 8px; font-size: 0.72rem; font-weight: 600;">STRONG BUY</span>
+            </td>
+            <!-- All three windows pending -->
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #f59e0b; font-size: 0.72rem; font-family: monospace; background: rgba(255,180,84,0.07); border-radius: 4px; padding: 2px 7px;">⏳ Apr 30</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #4D6080; font-size: 0.72rem; font-family: monospace;">May 30</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: center;">
+              <span style="color: #4D6080; font-size: 0.72rem; font-family: monospace;">Jun 29</span>
+            </td>
+            <td style="padding: 0.75rem; text-align: right; color: #4D6080; font-size: 0.72rem;">memo</td>
+          </tr>
+
+        </tbody>
+      </table>
+
+      <!-- Pagination -->
+      <div style="padding: 0.75rem 1rem; border-top: 1px solid rgba(90,169,255,0.08); display: flex; align-items: center; justify-content: space-between;">
+        <p style="font-size: 0.72rem; color: #4D6080;">Showing 1–4 of 47</p>
+        <div style="display: flex; gap: 4px;">
+          <button style="background: rgba(90,169,255,0.08); border: 1px solid rgba(90,169,255,0.15); border-radius: 4px; color: #5AA9FF; font-size: 0.72rem; padding: 4px 10px; cursor: pointer;">1</button>
+          <button style="background: transparent; border: 1px solid rgba(90,169,255,0.08); border-radius: 4px; color: #4D6080; font-size: 0.72rem; padding: 4px 10px; cursor: pointer;">2</button>
+          <button style="background: transparent; border: 1px solid rgba(90,169,255,0.08); border-radius: 4px; color: #4D6080; font-size: 0.72rem; padding: 4px 10px; cursor: pointer;">→</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── REGIME BREAKDOWN SECTION ── -->
+    <div style="background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(90,169,255,0.08); padding: 1rem;">
+      <p style="font-size: 0.82rem; font-weight: 600; color: #E8F0FF; margin-bottom: 0.85rem;">Accuracy by Volatility Regime</p>
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem;">
+
+        <!-- Low VIX (< 15) -->
+        <div style="background: rgba(60,225,181,0.05); border: 1px solid rgba(60,225,181,0.15); border-radius: 8px; padding: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <p class="label" style="color: #3CE1B5; font-size: 0.68rem;">VIX &lt; 15 · Low Vol</p>
+            <span style="font-size: 0.7rem; color: #4D6080; font-family: monospace;">14 convictions</span>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">ML acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #3CE1B5; font-family: monospace;">79%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">SEC acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #3CE1B5; font-family: monospace;">81%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">vs SPY</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #3CE1B5; font-family: monospace;">+5.1%</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Medium VIX (15-25) -->
+        <div style="background: rgba(255,180,84,0.05); border: 1px solid rgba(255,180,84,0.15); border-radius: 8px; padding: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <p class="label" style="color: #f59e0b; font-size: 0.68rem;">VIX 15–25 · Normal</p>
+            <span style="font-size: 0.7rem; color: #4D6080; font-family: monospace;">24 convictions</span>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">ML acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #f59e0b; font-family: monospace;">67%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">SEC acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #f59e0b; font-family: monospace;">72%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">vs SPY</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #f59e0b; font-family: monospace;">+3.8%</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- High VIX (> 25) -->
+        <div style="background: rgba(255,90,122,0.05); border: 1px solid rgba(255,90,122,0.15); border-radius: 8px; padding: 0.85rem;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <p class="label" style="color: #FF5A7A; font-size: 0.68rem;">VIX &gt; 25 · High Vol</p>
+            <span style="font-size: 0.7rem; color: #4D6080; font-family: monospace;">9 convictions</span>
+          </div>
+          <div style="display: flex; gap: 1rem;">
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">ML acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #FF5A7A; font-family: monospace;">52%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">SEC acc</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #FF5A7A; font-family: monospace;">61%</p>
+            </div>
+            <div>
+              <p style="font-size: 0.68rem; color: #4D6080;">vs SPY</p>
+              <p style="font-size: 1.15rem; font-weight: 700; color: #FF5A7A; font-family: monospace;">+1.2%</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <p style="font-size: 0.72rem; color: #4D6080; margin-top: 0.75rem;">VIX regime is recorded at time of conviction. Accuracy = direction match at 30d window. vs SPY = excess return of signal vs S&amp;P 500 over same period.</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- ================================================================
+     SECTION C: INLINE COMPACT VIEW
+     ================================================================ -->
+<h3 style="margin: 1.5rem 0 0.75rem; font-size: 1rem; font-weight: 600;">Inline compact view — appears at the bottom of every memo/signal output</h3>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1.5rem;">
+
+  <!-- CASE 1: Ticker has history -->
+  <div>
+    <p class="label" style="color: #4ade80; margin-bottom: 0.5rem; font-size: 0.72rem;">Case 1 — NVDA has prior convictions</p>
+    <div class="mockup" style="background: #111D34; border-radius: 10px; border: 1px solid rgba(90,169,255,0.15); overflow: hidden;">
+      <!-- simulate end of a memo block -->
+      <div style="padding: 0.85rem 1rem; border-bottom: 1px solid rgba(90,169,255,0.08);">
+        <p style="font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #5AA9FF; margin-bottom: 0.35rem;">Signal View</p>
+        <p style="font-size: 0.82rem; color: #8FA6C9; line-height: 1.5;">NVDA: <strong style="color: #3CE1B5;">STRONG BUY</strong> — momentum breakout confirmed by Q1 data center demand. Price target $1,050 on 60d horizon.</p>
+      </div>
+      <!-- Inline conviction footer -->
+      <div style="padding: 0.65rem 1rem; background: rgba(124,108,240,0.06); border-top: 1px solid rgba(124,108,240,0.12); display: flex; align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 0.6rem;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#7c6cf0" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <span style="font-size: 0.72rem; color: #8FA6C9;">RAPHI track record on <span style="color: #a78bfa; font-weight: 600;">NVDA</span>:</span>
+          <span style="font-size: 0.72rem; color: #3CE1B5; font-family: monospace; font-weight: 600;">71% ML acc</span>
+          <span style="color: #4D6080; font-size: 0.72rem;">·</span>
+          <span style="font-size: 0.72rem; color: #3CE1B5; font-family: monospace; font-weight: 600;">74% SEC acc</span>
+          <span style="color: #4D6080; font-size: 0.72rem;">·</span>
+          <span style="font-size: 0.72rem; color: #a78bfa; font-family: monospace; font-weight: 600;">+4.2% vs SPY</span>
+          <span style="font-size: 0.7rem; color: #4D6080;">over 6 prior calls</span>
+        </div>
+        <button onclick="switchPage('convictions')" style="background: none; border: none; font-size: 0.7rem; color: #7c6cf0; cursor: pointer; text-decoration: underline; padding: 0;">view ledger →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CASE 2: New ticker, no history -->
+  <div>
+    <p class="label" style="color: #f59e0b; margin-bottom: 0.5rem; font-size: 0.72rem;">Case 2 — SMCI, first conviction ever</p>
+    <div class="mockup" style="background: #111D34; border-radius: 10px; border: 1px solid rgba(90,169,255,0.15); overflow: hidden;">
+      <!-- simulate end of a memo block -->
+      <div style="padding: 0.85rem 1rem; border-bottom: 1px solid rgba(90,169,255,0.08);">
+        <p style="font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: #5AA9FF; margin-bottom: 0.35rem;">Signal View</p>
+        <p style="font-size: 0.82rem; color: #8FA6C9; line-height: 1.5;">SMCI: <strong style="color: #3CE1B5;">SPECULATIVE BUY</strong> — recovery from SEC investigation overhang appears complete. High risk; position sizing accordingly.</p>
+      </div>
+      <!-- Inline conviction footer — first call -->
+      <div style="padding: 0.65rem 1rem; background: rgba(255,180,84,0.04); border-top: 1px solid rgba(255,180,84,0.1); display: flex; align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 0.6rem;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <span style="font-size: 0.72rem; color: #8FA6C9;">Conviction recorded.</span>
+          <span style="font-size: 0.72rem; color: #f59e0b; font-weight: 500;">First RAPHI call on SMCI</span>
+          <span style="color: #4D6080; font-size: 0.72rem;">·</span>
+          <span style="font-size: 0.7rem; color: #4D6080;">resolution due in 30 / 60 / 90 days</span>
+        </div>
+        <button onclick="switchPage('convictions')" style="background: none; border: none; font-size: 0.7rem; color: #7c6cf0; cursor: pointer; text-decoration: underline; padding: 0;">view ledger →</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ================================================================
+     SECTION D: JS FUNCTIONS SPEC
+     ================================================================ -->
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #4ade80;">
+  <p class="label" style="color: #4ade80; margin-bottom: 0.85rem;">JavaScript functions to add to index.html</p>
+
+  <div style="display: grid; gap: 0.75rem; font-size: 0.8rem;">
+
+    <!-- loadConvictionStats -->
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 0.9rem;">
+      <div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem;">
+        <p style="font-family: monospace; font-size: 0.82rem; color: #4ade80; font-weight: 600;">loadConvictionStats(signal)</p>
+        <p style="color: #4D6080; font-size: 0.75rem;">— called by liveRefresh() and switchPage('convictions')</p>
+      </div>
+      <p style="color: #8FA6C9; margin-bottom: 0.5rem;">Calls <code>GET /api/convictions/stats</code> (no ticker filter). Writes the seven aggregate stat cards in the top bar. Also writes the pending count badge in the sidebar nav. Triggers a visual flash on the pending count badge if it changed since last call.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.6rem 0.75rem; border-radius: 6px; color: #8FA6C9; line-height: 1.7;">
+        DOM IDs written:<br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-stat-ml-30</span>, <span style="color: #a78bfa;">cl-stat-ml-60</span>, <span style="color: #a78bfa;">cl-stat-ml-90</span><br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-stat-sec</span>, <span style="color: #a78bfa;">cl-stat-spy</span><br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-stat-total</span>, <span style="color: #a78bfa;">cl-stat-pending</span><br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">nav-pending-count</span> (sidebar badge)
+      </div>
+    </div>
+
+    <!-- loadConvictionLedger -->
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 0.9rem;">
+      <div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem;">
+        <p style="font-family: monospace; font-size: 0.82rem; color: #4ade80; font-weight: 600;">loadConvictionLedger(signal, page=1, ticker=null, signalType=null, window=null)</p>
+      </div>
+      <p style="color: #8FA6C9; margin-bottom: 0.5rem;">Calls <code>GET /api/convictions/ledger?page=N&amp;ticker=X</code>. Renders the conviction history table, including state-specific cell rendering for confirmed (green ✓), contradicted (red ✗), and pending (amber timestamp) cells. Also handles regime breakdown rendering from the stats payload. Wired to filter dropdowns via <code>onchange</code> handlers that re-call this function.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.6rem 0.75rem; border-radius: 6px; color: #8FA6C9; line-height: 1.7;">
+        DOM IDs written:<br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-table-body</span> (tbody of conviction table)<br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-pagination</span> (page 1 of N display)<br>
+        &nbsp;&nbsp;<span style="color: #a78bfa;">cl-regime-low</span>, <span style="color: #a78bfa;">cl-regime-mid</span>, <span style="color: #a78bfa;">cl-regime-high</span>
+      </div>
+    </div>
+
+    <!-- loadTickerConvictionBadge -->
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 0.9rem;">
+      <div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem;">
+        <p style="font-family: monospace; font-size: 0.82rem; color: #4ade80; font-weight: 600;">loadTickerConvictionBadge(ticker, containerEl)</p>
+      </div>
+      <p style="color: #8FA6C9; margin-bottom: 0.5rem;">Calls <code>GET /api/convictions/stats?ticker=NVDA</code>. Renders the 1-line inline compact view footer into <code>containerEl</code> — which is the last child of the generated memo/signal output block. If the stats response has zero resolved convictions for that ticker, renders the "first call" variant instead. Called by the memo generation renderer and the signal card renderer immediately after their content is injected into the DOM.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.6rem 0.75rem; border-radius: 6px; color: #8FA6C9; line-height: 1.7;">
+        No fixed DOM IDs — appends to dynamic <code>containerEl</code> passed by caller.<br>
+        Caller pattern: <span style="color: #a78bfa;">loadTickerConvictionBadge(ticker, memoOutputEl)</span>
+      </div>
+    </div>
+
+    <!-- resolveConvictionsPoll -->
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 0.9rem;">
+      <div style="display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.5rem;">
+        <p style="font-family: monospace; font-size: 0.82rem; color: #4ade80; font-weight: 600;">resolveConvictionsPoll(signal)</p>
+        <p style="color: #4D6080; font-size: 0.75rem;">— called by liveRefresh() in background</p>
+      </div>
+      <p style="color: #8FA6C9; margin-bottom: 0.5rem;">Calls <code>GET /api/convictions/check</code>. Silent background call — no UI spinner. If response <code>resolved &gt; 0</code>, triggers a toast notification: "X convictions resolved — accuracy updated" and re-runs <code>loadConvictionStats()</code>. If the user is currently on the convictions page, also re-runs <code>loadConvictionLedger()</code> to refresh the table live. Never blocks the rest of liveRefresh.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.6rem 0.75rem; border-radius: 6px; color: #8FA6C9; line-height: 1.7;">
+        No DOM IDs of its own.<br>
+        Calls: <span style="color: #a78bfa;">loadConvictionStats()</span>, optionally <span style="color: #a78bfa;">loadConvictionLedger()</span>, <span style="color: #a78bfa;">showToast()</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ================================================================
+     SECTION E: liveRefresh integration
+     ================================================================ -->
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #7c6cf0;">
+  <p class="label" style="color: #7c6cf0; margin-bottom: 0.75rem;">liveRefresh() integration — two additions</p>
+
+  <p style="font-size: 0.82rem; margin-bottom: 0.75rem;">Two lines are added to the existing <code>liveRefresh()</code> <code>Promise.all</code> array. Both are fire-and-forget from the dashboard's perspective — they run in parallel with the other fetches and never cause the refresh to stall even if the convictions API is slow.</p>
+
+  <div style="font-family: monospace; font-size: 0.78rem; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 1rem; line-height: 1.9; color: #8FA6C9;">
+    <span style="color: #4D6080;">// existing liveRefresh() Promise.all — additions shown with arrows</span><br>
+    await Promise.all([<br>
+    &nbsp;&nbsp;loadDashboardMarket(sig),<br>
+    &nbsp;&nbsp;loadDashboardSignals(sig),<br>
+    &nbsp;&nbsp;loadDashboardAlerts(sig),<br>
+    &nbsp;&nbsp;loadPortfolioPage(sig),<br>
+    &nbsp;&nbsp;loadDashboardModelAccuracy(sig),<br>
+    &nbsp;&nbsp;loadWatchlistPrices(sig),<br>
+    &nbsp;&nbsp;<span style="color: #4ade80;">loadConvictionStats(sig),&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// ← NEW: writes sidebar badge + stat cards</span><br>
+    &nbsp;&nbsp;<span style="color: #4ade80;">resolveConvictionsPoll(sig),&nbsp;&nbsp;&nbsp;// ← NEW: checks for due lookbacks silently</span><br>
+    ]);
+  </div>
+
+  <p style="font-size: 0.8rem; color: #8FA6C9; margin-top: 0.75rem;">Additionally, the <code>loaders</code> object in <code>switchPage()</code> gains one new entry:</p>
+  <div style="font-family: monospace; font-size: 0.78rem; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 0.75rem; line-height: 1.9; color: #8FA6C9; margin-top: 0.5rem;">
+    convictions: () =&gt; Promise.all([loadConvictionStats(sig), loadConvictionLedger(sig)]),
+  </div>
+</div>
+
+<!-- ================================================================
+     SECTION F: VISUAL STATE REFERENCE
+     ================================================================ -->
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #94a3b8;">
+  <p class="label" style="color: #94a3b8; margin-bottom: 0.85rem;">Visual state reference — table cell rendering rules</p>
+  <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; font-size: 0.8rem;">
+
+    <div style="background: rgba(60,225,181,0.06); border: 1px solid rgba(60,225,181,0.2); border-radius: 8px; padding: 0.85rem;">
+      <p class="label" style="color: #3CE1B5; margin-bottom: 0.5rem; font-size: 0.7rem;">Confirmed — direction correct</p>
+      <div style="display: inline-flex; align-items: center; gap: 3px; background: rgba(60,225,181,0.1); color: #3CE1B5; border-radius: 4px; padding: 3px 9px; font-family: monospace; font-size: 0.78rem; font-weight: 600; margin-bottom: 0.5rem;">✓ +11.4%</div>
+      <p style="font-size: 0.75rem; color: #8FA6C9;">Green background, checkmark, actual return. Tooltip: "[ticker] was [BULLISH/BEARISH], price moved [+/-X%]"</p>
+    </div>
+
+    <div style="background: rgba(255,90,122,0.06); border: 1px solid rgba(255,90,122,0.2); border-radius: 8px; padding: 0.85rem;">
+      <p class="label" style="color: #FF5A7A; margin-bottom: 0.5rem; font-size: 0.7rem;">Contradicted — direction wrong</p>
+      <div style="display: inline-flex; align-items: center; gap: 3px; background: rgba(255,90,122,0.1); color: #FF5A7A; border-radius: 4px; padding: 3px 9px; font-family: monospace; font-size: 0.78rem; font-weight: 600; margin-bottom: 0.5rem;">✗ +6.3%</div>
+      <p style="font-size: 0.75rem; color: #8FA6C9;">Red background, X mark, actual return. Row gets a faint red row background rgba(255,90,122,0.02) to make errors scannable.</p>
+    </div>
+
+    <div style="background: rgba(255,180,84,0.06); border: 1px solid rgba(255,180,84,0.2); border-radius: 8px; padding: 0.85rem;">
+      <p class="label" style="color: #f59e0b; margin-bottom: 0.5rem; font-size: 0.7rem;">Pending — not yet due</p>
+      <div style="display: inline-flex; align-items: center; gap: 3px; background: rgba(255,180,84,0.07); color: #f59e0b; border-radius: 4px; padding: 3px 9px; font-family: monospace; font-size: 0.78rem; font-weight: 600; margin-bottom: 0.5rem;">⏳ Apr 30</div>
+      <p style="font-size: 0.75rem; color: #8FA6C9;">Amber for the nearest upcoming window. Muted gray text for farther windows. Due date shown in "Mon DD" format.</p>
+    </div>
+
+  </div>
+</div>

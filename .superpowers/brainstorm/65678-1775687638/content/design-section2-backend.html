@@ -1,0 +1,115 @@
+<h2>Design · Section 2 of 4</h2>
+<p class="subtitle">Backend — one new file, three new API endpoints, two integration points</p>
+
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #7c6cf0;">
+  <p class="label" style="color: #7c6cf0;">New file: backend/conviction_store.py</p>
+  <p style="font-size: 0.82rem; margin: 0.5rem 0 0.75rem;">Single responsibility: read, write, and resolve convictions. Nothing else touches the JSONL files directly.</p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 0.82rem;">
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p class="label" style="color: #4ade80; margin-bottom: 0.5rem;">write_conviction()</p>
+      <p>Called when any research output is generated. Accepts the typed outputs from market-analyst, sec-researcher, ml-signals agents. Builds the conviction object, appends to convictions.jsonl.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6;">
+        write_conviction(<br>
+        &nbsp;&nbsp;ticker: str,<br>
+        &nbsp;&nbsp;ml: MLSignalOutput,<br>
+        &nbsp;&nbsp;sec: SECResearcherOutput,<br>
+        &nbsp;&nbsp;signal_view: str,<br>
+        &nbsp;&nbsp;source: str<br>
+        ) → str  # returns conviction_id
+      </div>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p class="label" style="color: #4ade80; margin-bottom: 0.5rem;">check_pending()</p>
+      <p>Called by liveRefresh via API. Reads all convictions, joins with resolutions to find unresolved lookback windows whose due dates have passed. For each: fetches price via yfinance, computes result, appends to resolutions.jsonl.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6;">
+        check_pending() → {<br>
+        &nbsp;&nbsp;"resolved": int,<br>
+        &nbsp;&nbsp;"still_pending": int,<br>
+        &nbsp;&nbsp;"errors": list[str]<br>
+        }
+      </div>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p class="label" style="color: #4ade80; margin-bottom: 0.5rem;">get_accuracy_stats()</p>
+      <p>Reads both JSONL files, joins by conviction_id, computes accuracy scores. Returns stats by signal type, by lookback window, and by ticker. This powers both the ledger page and the inline compact view.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6;">
+        get_accuracy_stats(<br>
+        &nbsp;&nbsp;ticker: str | None,<br>
+        &nbsp;&nbsp;lookback: str | None<br>
+        ) → AccuracyStats
+      </div>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p class="label" style="color: #4ade80; margin-bottom: 0.5rem;">get_ledger()</p>
+      <p>Returns full conviction history for the ledger page: all convictions with their resolved/pending status per lookback window. Sorted by date descending. Paginated (50 per page).</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6;">
+        get_ledger(<br>
+        &nbsp;&nbsp;page: int = 1,<br>
+        &nbsp;&nbsp;ticker: str | None<br>
+        ) → LedgerPage
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #4ade80;">
+  <p class="label" style="color: #4ade80;">Three new API endpoints in raphi_server.py</p>
+  <div style="font-size: 0.82rem; margin-top: 0.75rem; display: grid; gap: 0.75rem;">
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.78rem;">
+      <span style="color:#7c6cf0;">POST</span> /api/convictions<br>
+      <span style="color:#94a3b8; font-family: sans-serif; font-size: 0.75rem;">Called internally when a memo or signal is generated. Writes a new conviction. Rate limited: 60/min (data tier). Returns conviction_id.</span>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.78rem;">
+      <span style="color:#4ade80;">GET</span> /api/convictions/check<br>
+      <span style="color:#94a3b8; font-family: sans-serif; font-size: 0.75rem;">Called by liveRefresh every cycle. Resolves all elapsed pending lookbacks. Idempotent — safe to call repeatedly. Returns {resolved, still_pending, errors}.</span>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.78rem;">
+      <span style="color:#4ade80;">GET</span> /api/convictions/stats?ticker=NVDA<br>
+      <span style="color:#94a3b8; font-family: sans-serif; font-size: 0.75rem;">Returns accuracy stats. ticker param is optional — omit for portfolio-wide stats. Powers both the ledger page aggregate view and the inline compact accuracy line on each memo.</span>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.75rem; font-family: monospace; font-size: 0.78rem;">
+      <span style="color:#4ade80;">GET</span> /api/convictions/ledger?page=1&ticker=NVDA<br>
+      <span style="color:#94a3b8; font-family: sans-serif; font-size: 0.75rem;">Full conviction history for the ledger page. Paginated at 50 per page. ticker param optional for filtering.</span>
+    </div>
+  </div>
+</div>
+
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #f59e0b;">
+  <p class="label" style="color: #f59e0b;">Two integration points in existing code</p>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.75rem; font-size: 0.82rem;">
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p style="font-weight: 600; margin-bottom: 0.4rem;">1. a2a_executor_v2.py — on research completion</p>
+      <p>After the memo-synthesizer returns a validated output, call <code>write_conviction()</code> with the typed agent outputs. This is the only place convictions are created — not from chat, not from the dashboard, only from completed research outputs.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6; color: #4ade80;">
+        # After schema validation passes:<br>
+        conviction_id = write_conviction(<br>
+        &nbsp;&nbsp;ticker, ml_out, sec_out,<br>
+        &nbsp;&nbsp;memo.signal_view, "memo"<br>
+        )
+      </div>
+    </div>
+    <div style="background: rgba(0,0,0,0.2); border-radius: 8px; padding: 1rem;">
+      <p style="font-weight: 600; margin-bottom: 0.4rem;">2. raphi_server.py — liveRefresh hook</p>
+      <p>The existing <code>GET /api/health</code> or a new lightweight endpoint that <code>liveRefresh()</code> already calls gets extended. Alternatively, the frontend calls <code>/api/convictions/check</code> directly in its Promise.all — no server-side scheduling needed.</p>
+      <div style="font-family: monospace; font-size: 0.75rem; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; margin-top: 0.5rem; line-height: 1.6; color: #4ade80;">
+        // index.html liveRefresh()<br>
+        Promise.all([<br>
+        &nbsp;&nbsp;loadMarketMetrics(),<br>
+        &nbsp;&nbsp;loadDashboardSignals(),<br>
+        &nbsp;&nbsp;checkPendingConvictions(), ← new<br>
+        ])
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">Error handling rules</p>
+  <p style="margin-top: 0.5rem; font-size: 0.83rem;">
+    <strong>yfinance fails during check:</strong> Skip that conviction this cycle. Nothing written. Retry next liveRefresh.<br>
+    <strong>EDGAR data not yet updated:</strong> SEC check skipped. Only fires when new num.txt data exists for that ticker's next expected period.<br>
+    <strong>Conviction already has a resolution for that lookback:</strong> Skip. Resolution JSONL is deduplicated by (conviction_id, lookback) on read.<br>
+    <strong>File write error:</strong> Log to Sentry. Return error in check response. UI shows "ledger unavailable" gracefully.
+  </p>
+</div>

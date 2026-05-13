@@ -1,0 +1,320 @@
+<h2>Design · Section 4 of 4</h2>
+<p class="subtitle">End-to-End Data Flow — conviction creation, lookback resolution, and accuracy display</p>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- SCENARIO A: CONVICTION CREATION                            -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="margin-bottom: 2rem;">
+  <p class="label" style="color: #7c6cf0; font-size: 0.9rem; margin-bottom: 1rem;">Scenario A — Conviction Creation Path</p>
+
+  <!-- Row 1: User → Executor → Memo Synthesizer -->
+  <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.82rem; border-left: 3px solid #94a3b8; color: #e2e8f0;">
+      <strong style="color:#94a3b8;">User Query</strong><br>
+      <span style="color:#94a3b8; font-size:0.75rem;">"Analyse NVDA for me"</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem;">→</span>
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.82rem; border-left: 3px solid #7c6cf0; color: #e2e8f0;">
+      <strong style="color:#7c6cf0;">RaphiAgentExecutor</strong><br>
+      <span style="color:#94a3b8; font-size:0.75rem;">a2a_executor_v2.py<br>sanitize_user_input() → query()</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem;">→</span>
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.82rem; border-left: 3px solid #7c6cf0; color: #e2e8f0;">
+      <strong style="color:#7c6cf0;">@memo-synthesizer</strong><br>
+      <span style="color:#94a3b8; font-size:0.75rem;">SYSTEM_PROMPT routes multi-source<br>queries here via Task tool</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem;">→</span>
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.82rem; border-left: 3px solid #7c6cf0; color: #e2e8f0;">
+      <strong style="color:#7c6cf0;">4 Parallel Sub-Agents</strong><br>
+      <span style="color:#94a3b8; font-size:0.75rem;">Promise.all dispatch via Task tool</span>
+    </div>
+  </div>
+
+  <!-- Row 2: 4 agents -->
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-left: 2rem; margin-bottom: 0.5rem;">
+    <div style="background: rgba(124,108,240,0.12); border-radius: 8px; padding: 0.65rem 0.75rem; font-size: 0.78rem; border: 1px solid rgba(124,108,240,0.3);">
+      <strong style="color:#7c6cf0;">@market-analyst</strong><br>
+      <span style="color:#94a3b8;">mcp__raphi__stock_detail<br>→ current_price, pe_ratio,<br>sector, revenue_growth</span>
+    </div>
+    <div style="background: rgba(124,108,240,0.12); border-radius: 8px; padding: 0.65rem 0.75rem; font-size: 0.78rem; border: 1px solid rgba(124,108,240,0.3);">
+      <strong style="color:#7c6cf0;">@sec-researcher</strong><br>
+      <span style="color:#94a3b8;">mcp__raphi__sec_filings<br>→ trend, latest_revenue,<br>quarters_used, next_filing_due</span>
+    </div>
+    <div style="background: rgba(124,108,240,0.12); border-radius: 8px; padding: 0.65rem 0.75rem; font-size: 0.78rem; border: 1px solid rgba(124,108,240,0.3);">
+      <strong style="color:#7c6cf0;">@ml-signals</strong><br>
+      <span style="color:#94a3b8;">mcp__raphi__ml_signal<br>→ direction, probability,<br>model_version, shap_top3</span>
+    </div>
+    <div style="background: rgba(124,108,240,0.12); border-radius: 8px; padding: 0.65rem 0.75rem; font-size: 0.78rem; border: 1px solid rgba(124,108,240,0.3);">
+      <strong style="color:#7c6cf0;">@portfolio-risk</strong><br>
+      <span style="color:#94a3b8;">mcp__raphi__portfolio_snapshot<br>→ signal_view synthesis,<br>conviction level (LOW/MED/HIGH)</span>
+    </div>
+  </div>
+
+  <!-- Row 3: validation gate -->
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; margin-left: 2rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.78rem; border-left: 3px solid #f59e0b; flex: 1; min-width: 220px;">
+      <strong style="color:#f59e0b;">Schema Validation Gate</strong><br>
+      <span style="color:#94a3b8;">memo-synthesizer validates each sub-agent response<br>against typed schema before assembling conviction:<br>
+      • ml: direction ∈ {LONG, SHORT, NEUTRAL}, probability ∈ [0,1]<br>
+      • sec: trend ∈ {accelerating, stable, decelerating}, revenue numeric<br>
+      • market: current_price &gt; 0, ticker regex ^[A-Z]{1,5}$<br>
+      • If one agent fails: that field set to null; conviction still written<br>&nbsp;&nbsp;with source="partial_memo"; missing fields excluded from accuracy</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(74,222,128,0.1); border-radius: 8px; padding: 0.6rem 1rem; font-size: 0.78rem; border-left: 3px solid #4ade80; flex: 1; min-width: 220px;">
+      <strong style="color:#4ade80;">write_conviction()</strong><br>
+      <span style="color:#94a3b8;">conviction_store.py hook called from a2a_executor_v2.py<br>after final response assembled. Builds conviction object:<br>
+      • id: "cvx-{date}-{ticker}-{rand3}"<br>
+      • entry_price: from @market-analyst current_price<br>
+      • ml.{direction,probability,model_version}: from @ml-signals<br>
+      • sec.{trend,latest_revenue,quarters_used,next_filing_due}: from @sec-researcher<br>
+      • signal_view, conviction: synthesized by @portfolio-risk<br>
+      • lookbacks_due: {30d,60d,90d} = date + {30,60,90} calendar days<br>
+      • source: "memo" | "signal_view" | "chat"</span>
+    </div>
+  </div>
+
+  <!-- Row 4: write arrow -->
+  <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: 2rem;">
+    <span style="color:#94a3b8; font-size:1.1rem; margin-left:45%;">↓</span>
+  </div>
+  <div style="margin-left: 2rem; display: flex; justify-content: center;">
+    <div style="background: rgba(74,222,128,0.12); border-radius: 8px; padding: 0.6rem 1.25rem; font-size: 0.78rem; border: 1px solid rgba(74,222,128,0.4); text-align: center;">
+      <strong style="color:#4ade80;">convictions.jsonl</strong>
+      <span style="color:#94a3b8; margin-left: 0.75rem;">append-only · one line · returns conviction_id → included in agent response text</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- SCENARIO B: ML LOOKBACK RESOLUTION                         -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="margin-bottom: 2rem;">
+  <p class="label" style="color: #f59e0b; font-size: 0.9rem; margin-bottom: 1rem;">Scenario B — ML Lookback Resolution (30/60/90d)</p>
+
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem;">
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #94a3b8;">
+      <strong style="color:#94a3b8;">liveRefresh()</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">index.html · fires every N min<br>Promise.all([..., checkPendingConvictions()])</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #94a3b8;">
+      <strong style="color:#94a3b8;">checkPendingConvictions()</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">GET /api/convictions/check<br>fetch → FastAPI route</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #f59e0b;">
+      <strong style="color:#f59e0b;">check_pending()</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">conviction_store.py<br>reads both JSONL files</span>
+    </div>
+  </div>
+
+  <!-- Read phase -->
+  <div style="background: rgba(245,158,11,0.06); border-radius: 8px; padding: 0.85rem 1rem; margin-bottom: 0.5rem; font-size: 0.78rem; border: 1px solid rgba(245,158,11,0.2);">
+    <strong style="color:#f59e0b;">Read &amp; Join Phase</strong>
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem;">
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.5rem 0.75rem;">
+        <span style="color:#f59e0b; font-size:0.75rem;">① Read convictions.jsonl</span><br>
+        <span style="color:#94a3b8; font-size:0.72rem;">Build dict: id → {ticker, ml.direction, entry_price, lookbacks_due}</span>
+      </div>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.5rem 0.75rem;">
+        <span style="color:#f59e0b; font-size:0.75rem;">② Read resolutions.jsonl</span><br>
+        <span style="color:#94a3b8; font-size:0.72rem;">Build set: {conviction_id + lookback} already resolved — skip these</span>
+      </div>
+      <div style="background: rgba(0,0,0,0.2); border-radius: 6px; padding: 0.5rem 0.75rem;">
+        <span style="color:#f59e0b; font-size:0.75rem;">③ Filter: past-due &amp; unresolved</span><br>
+        <span style="color:#94a3b8; font-size:0.72rem;">For each conviction × {30d,60d,90d}: if today ≥ lookbacks_due[window] AND not in resolved set → enqueue</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Price fetch + compute -->
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
+    <div style="background: rgba(124,108,240,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #7c6cf0; flex: 1;">
+      <strong style="color:#7c6cf0;">yfinance price fetch</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">yf.Ticker(ticker).history(period="5d")<br>Use most recent market close ≥ due_date<br>Also fetch SPY for relative return computation</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #f59e0b; flex: 1.5;">
+      <strong style="color:#f59e0b;">Result Computation</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">
+        price_return = (close - entry_price) / entry_price × 100<br>
+        CONFIRMED: LONG &amp; price_return &gt; 0, or SHORT &amp; price_return &lt; 0<br>
+        CONTRADICTED: opposite direction<br>
+        vs_spy_pct = price_return − SPY return over same window<br>
+        vix_at_check: fetched from ^VIX history
+      </span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(74,222,128,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #4ade80; flex: 1;">
+      <strong style="color:#4ade80;">Append resolution</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">resolutions.jsonl ← one line<br>{conviction_id, lookback, ml_result,<br>price_at_check, vs_entry_pct, vs_spy_pct, vix_at_check}</span>
+    </div>
+  </div>
+
+  <!-- Edge cases -->
+  <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.75rem; border: 1px solid rgba(148,163,184,0.15);">
+    <strong style="color:#94a3b8;">Edge Cases</strong>
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; margin-top: 0.5rem; color:#94a3b8;">
+      <div><span style="color:#f59e0b;">yfinance fails / timeout:</span> skip this resolution, add to errors[], still_pending++. Retried on next liveRefresh cycle. No partial write.</div>
+      <div><span style="color:#f59e0b;">Already resolved:</span> resolved set lookup (O(1)) prevents duplicate. Idempotent — safe to run multiple times.</div>
+      <div><span style="color:#f59e0b;">Market holiday:</span> history(period="5d") returns last available close. If no data in 5d window → treated as yfinance failure, deferred.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- SCENARIO C: SEC FILING RESOLUTION                          -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="margin-bottom: 2rem;">
+  <p class="label" style="color: #7c6cf0; font-size: 0.9rem; margin-bottom: 1rem;">Scenario C — SEC Filing Resolution (data-triggered, not time-triggered)</p>
+
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem;">
+    <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #94a3b8;">
+      <strong style="color:#94a3b8;">Trigger: same liveRefresh()</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">check_pending() also handles SEC window<br>lookback key = "sec", not a fixed day offset</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #f59e0b; flex: 1;">
+      <strong style="color:#f59e0b;">Condition: new filing has arrived</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">
+        conviction.sec.next_filing_due is stored at creation time (from @sec-researcher).<br>
+        check_pending() logic: today ≥ next_filing_due AND "sec" not in resolved set<br>
+        → attempt SEC resolution for this conviction
+      </span>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem;">
+    <div style="background: rgba(124,108,240,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #7c6cf0; flex: 1;">
+      <strong style="color:#7c6cf0;">EDGAR data fetch via sec_data.py</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">
+        sec.company_financials(ticker) → reads local XBRL num.txt files<br>
+        Filters to quarters filed AFTER conviction date<br>
+        Pulls "Revenues" tag (or fallback synonyms) for latest available quarter<br>
+        Returns: actual_revenue, period_of_report
+      </span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #f59e0b; flex: 1;">
+      <strong style="color:#f59e0b;">Trend verification logic</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">
+        revenue_delta_pct = (actual − latest_revenue) / latest_revenue × 100<br>
+        CONFIRMED: trend="accelerating" &amp; delta &gt; +3%, or trend="decelerating" &amp; delta &lt; −3%<br>
+        CONTRADICTED: direction mismatch beyond threshold<br>
+        INCONCLUSIVE: |delta| ≤ 3% (noise band) — excluded from accuracy denominator
+      </span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(74,222,128,0.1); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #4ade80;">
+      <strong style="color:#4ade80;">Append SEC resolution</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">resolutions.jsonl ←<br>{conviction_id, lookback:"sec",<br>sec_result, actual_revenue,<br>revenue_delta_pct, resolved_date}</span>
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.65rem 1rem; font-size: 0.75rem; color:#94a3b8; border: 1px solid rgba(148,163,184,0.15);">
+    <strong style="color:#94a3b8;">Edge cases:</strong>
+    No new filing yet (today &lt; next_filing_due): skip, still_pending++.
+    EDGAR data missing for ticker: error[], deferred.
+    Filing arrived but revenue tag absent in XBRL: INCONCLUSIVE written, excluded from denominator.
+    sec.next_filing_due was null at creation (partial_memo): SEC resolution never attempted for this conviction.
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- SCENARIO D: ACCURACY STATS                                 -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="margin-bottom: 2rem;">
+  <p class="label" style="color: #4ade80; font-size: 0.9rem; margin-bottom: 1rem;">Scenario D — Accuracy Stats Computation</p>
+
+  <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-bottom: 0.75rem;">
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.65rem 0.8rem; font-size: 0.78rem; border-top: 2px solid #f59e0b;">
+      <strong style="color:#f59e0b;">① Read convictions.jsonl</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">Build lookup: conviction_id → {ticker, ml.direction, sec.trend, signal_view, source, date}</span>
+    </div>
+    <div style="background: rgba(245,158,11,0.1); border-radius: 8px; padding: 0.65rem 0.8rem; font-size: 0.78rem; border-top: 2px solid #f59e0b;">
+      <strong style="color:#f59e0b;">② Read resolutions.jsonl</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">Group by conviction_id: dict[id] = list[resolution]. Each resolution has lookback key + result value.</span>
+    </div>
+    <div style="background: rgba(74,222,128,0.1); border-radius: 8px; padding: 0.65rem 0.8rem; font-size: 0.78rem; border-top: 2px solid #4ade80;">
+      <strong style="color:#4ade80;">③ Join &amp; Compute</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">For each conviction: join its resolutions. For each resolved lookback: tally CONFIRMED or CONTRADICTED. INCONCLUSIVE and still-pending: excluded from denominator entirely.</span>
+    </div>
+    <div style="background: rgba(74,222,128,0.1); border-radius: 8px; padding: 0.65rem 0.8rem; font-size: 0.78rem; border-top: 2px solid #4ade80;">
+      <strong style="color:#4ade80;">④ Aggregate Dimensions</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">accuracy = CONFIRMED / (CONFIRMED + CONTRADICTED)<br>
+      Slices: by signal_type (ml/sec), by lookback (30d/60d/90d/sec), by ticker, overall</span>
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 0.65rem 1rem; font-size: 0.75rem; color:#94a3b8; border: 1px solid rgba(148,163,184,0.15); margin-bottom: 0.5rem;">
+    <strong style="color:#94a3b8;">Denominator rule:</strong>
+    A conviction with zero resolutions is "pending" — never enters the accuracy calculation.
+    A conviction with some resolutions only contributes for the windows that have resolved.
+    Example: a 15-day-old conviction contributes nothing (all 3 ML windows still future),
+    a 35-day-old conviction contributes its 30d result only.
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- DISPLAY PATH (Scenario D continued)                        -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="margin-bottom: 1rem;">
+  <p class="label" style="color: #94a3b8; font-size: 0.9rem; margin-bottom: 1rem;">Display Path — stats and ledger surface points</p>
+
+  <div style="display: flex; align-items: flex-start; gap: 0.5rem; flex-wrap: wrap;">
+    <div style="background: rgba(74,222,128,0.08); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #4ade80;">
+      <strong style="color:#4ade80;">GET /api/convictions/stats</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">→ get_accuracy_stats()<br>params: ticker?, lookback?<br>returns AccuracyStats JSON</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">→</span>
+    <div style="background: rgba(148,163,184,0.08); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #94a3b8; flex: 1;">
+      <strong style="color:#94a3b8;">Inline Compact View</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">Displayed in agent chat response and signal cards.<br>
+      Format: "ML accuracy: 74% (30d, 41 resolved) · SEC: 68% (12 resolved)"<br>
+      Rendered by liveRefresh() after checkPendingConvictions() resolves</span>
+    </div>
+    <span style="color:#94a3b8; font-size:1.1rem; margin-top:0.6rem;">+</span>
+    <div style="background: rgba(148,163,184,0.08); border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.78rem; border-left: 3px solid #94a3b8; flex: 1.5;">
+      <strong style="color:#94a3b8;">GET /api/convictions/ledger → Ledger Page</strong><br>
+      <span style="color:#94a3b8; font-size:0.72rem;">get_ledger(page, ticker?) → LedgerPage<br>
+      Full table: conviction row + status per window (✓ CONFIRMED / ✗ CONTRADICTED / ⏳ pending)<br>
+      Columns: date, ticker, direction, 30d, 60d, 90d, SEC, vs_spy<br>
+      Sorted: date desc · Paginated: 50/page · Filterable by ticker or signal type</span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- FULL SYSTEM SUMMARY (compact one-liner flow)               -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div style="background: rgba(255,255,255,0.04); border-radius: 8px; padding: 1rem 1.25rem; margin-top: 0.5rem; font-size: 0.78rem; border: 1px solid rgba(255,255,255,0.08);">
+  <p class="label" style="color: #94a3b8; margin-bottom: 0.6rem; font-size:0.8rem;">Complete System Flow (one line)</p>
+  <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; line-height: 2;">
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">User query</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">RaphiAgentExecutor</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">@memo-synthesizer</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">4 parallel agents</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">schema validation</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(74,222,128,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #4ade80; font-size:0.75rem;">write_conviction()</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(74,222,128,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #4ade80; font-size:0.75rem;">convictions.jsonl</span>
+    <span style="color:#94a3b8;">···</span>
+    <span style="background: rgba(148,163,184,0.12); border-radius: 4px; padding: 0.2rem 0.5rem; color: #94a3b8; font-size:0.75rem;">liveRefresh()</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(245,158,11,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #f59e0b; font-size:0.75rem;">check_pending()</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(124,108,240,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #7c6cf0; font-size:0.75rem;">yfinance / EDGAR</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(74,222,128,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #4ade80; font-size:0.75rem;">resolutions.jsonl</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(245,158,11,0.15); border-radius: 4px; padding: 0.2rem 0.5rem; color: #f59e0b; font-size:0.75rem;">get_accuracy_stats()</span>
+    <span style="color:#94a3b8;">→</span>
+    <span style="background: rgba(148,163,184,0.12); border-radius: 4px; padding: 0.2rem 0.5rem; color: #94a3b8; font-size:0.75rem;">ledger + inline display</span>
+  </div>
+</div>

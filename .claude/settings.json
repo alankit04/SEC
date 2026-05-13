@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"/Users/alan/Desktop/SEC Data\" && [[ \"$CLAUDE_TOOL_INPUT_FILE_PATH\" == *.py ]] && .venv/bin/ruff format \"$CLAUDE_TOOL_INPUT_FILE_PATH\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
+}

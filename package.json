@@ -1,0 +1,12 @@
+{
+  "name": "raphi-backend",
+  "version": "1.0.0",
+  "description": "RAPHI FastAPI backend dev server launcher",
+  "scripts": {
+    "start": "node server.js",
+    "test:e2e": "node scripts/e2e-smoke.mjs",
+    "start:legacy": ".venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload",
+    "start:a2a": ".venv/bin/python -m backend.a2a_server"
+  },
+  "private": true
+}

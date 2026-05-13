@@ -1,0 +1,89 @@
+<h2>Design · Section 1 of 4</h2>
+<p class="subtitle">Data Model — the two JSONL files and what lives in each</p>
+
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem;">
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #7c6cf0;">
+    <p class="label" style="color: #7c6cf0;">convictions.jsonl — write once, never mutate</p>
+    <p style="font-size: 0.82rem; margin: 0.5rem 0 0.75rem;">One line appended every time RAPHI generates a research output (memo, signal, or chat with a ticker conclusion). Immutable.</p>
+    <div style="background: rgba(0,0,0,0.25); border-radius: 6px; padding: 0.85rem; font-family: monospace; font-size: 0.73rem; line-height: 1.8; overflow-x: auto;">
+      {<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"id"</span>: <span style="color:#4ade80;">"cvx-20260408-NVDA-a3f"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"ticker"</span>: <span style="color:#4ade80;">"NVDA"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"date"</span>: <span style="color:#4ade80;">"2026-04-08T14:32:11Z"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"entry_price"</span>: <span style="color:#f59e0b;">890.50</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"ml"</span>: {<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"direction"</span>: <span style="color:#4ade80;">"LONG"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"probability"</span>: <span style="color:#f59e0b;">0.71</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"model_version"</span>: <span style="color:#4ade80;">"xgb_v2.1"</span><br>
+      &nbsp;&nbsp;},<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"sec"</span>: {<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"trend"</span>: <span style="color:#4ade80;">"accelerating"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"latest_revenue"</span>: <span style="color:#f59e0b;">44200000000</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"quarters_used"</span>: <span style="color:#f59e0b;">8</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"next_filing_due"</span>: <span style="color:#4ade80;">"2026-07-15"</span><br>
+      &nbsp;&nbsp;},<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"signal_view"</span>: <span style="color:#4ade80;">"Positive"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"conviction"</span>: <span style="color:#4ade80;">"MEDIUM"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"source"</span>: <span style="color:#4ade80;">"memo"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"lookbacks_due"</span>: {<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"30d"</span>: <span style="color:#4ade80;">"2026-05-08"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"60d"</span>: <span style="color:#4ade80;">"2026-06-07"</span>,<br>
+      &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7c6cf0;">"90d"</span>: <span style="color:#4ade80;">"2026-07-07"</span><br>
+      &nbsp;&nbsp;}<br>
+      }
+    </div>
+  </div>
+
+  <div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; border-top: 3px solid #4ade80;">
+    <p class="label" style="color: #4ade80;">resolutions.jsonl — append on each check</p>
+    <p style="font-size: 0.82rem; margin: 0.5rem 0 0.75rem;">One line per resolved lookback window. A single conviction generates up to 4 resolution lines: 30d ML, 60d ML, 90d ML, and SEC filing. Each is independent.</p>
+    <div style="background: rgba(0,0,0,0.25); border-radius: 6px; padding: 0.85rem; font-family: monospace; font-size: 0.73rem; line-height: 1.8;">
+      <span style="color:#94a3b8;">// ML 30-day check</span><br>
+      {<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"conviction_id"</span>: <span style="color:#4ade80;">"cvx-20260408-NVDA-a3f"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"lookback"</span>: <span style="color:#4ade80;">"30d"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"resolved_date"</span>: <span style="color:#4ade80;">"2026-05-08"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"ml_result"</span>: <span style="color:#4ade80;">"CONFIRMED"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"price_at_check"</span>: <span style="color:#f59e0b;">962.30</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"vs_entry_pct"</span>: <span style="color:#f59e0b;">8.1</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"vs_spy_pct"</span>: <span style="color:#f59e0b;">6.8</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"vix_at_check"</span>: <span style="color:#f59e0b;">16.2</span><br>
+      }<br><br>
+      <span style="color:#94a3b8;">// SEC filing check (when 10-Q arrives)</span><br>
+      {<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"conviction_id"</span>: <span style="color:#4ade80;">"cvx-20260408-NVDA-a3f"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"lookback"</span>: <span style="color:#4ade80;">"sec"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"resolved_date"</span>: <span style="color:#4ade80;">"2026-07-16"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"sec_result"</span>: <span style="color:#4ade80;">"CONFIRMED"</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"actual_revenue"</span>: <span style="color:#f59e0b;">49800000000</span>,<br>
+      &nbsp;&nbsp;<span style="color:#7c6cf0;">"revenue_delta_pct"</span>: <span style="color:#f59e0b;">12.7</span><br>
+      }
+    </div>
+  </div>
+</div>
+
+<div style="background: rgba(255,255,255,0.04); border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem; border-top: 3px solid #f59e0b;">
+  <p class="label" style="color: #f59e0b;">Key design rules</p>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.75rem; font-size: 0.82rem;">
+    <div>
+      <p><strong>IDs:</strong> <code>cvx-{date}-{ticker}-{random3}</code> — human-readable, unique, sortable by date</p>
+      <p><strong>convictions.jsonl</strong> is append-only — never read to resolve. Only read for display.</p>
+      <p><strong>source</strong> field tracks what generated the conviction: <code>"memo"</code> · <code>"signal_query"</code> · <code>"chat"</code></p>
+    </div>
+    <div>
+      <p><strong>resolutions.jsonl</strong> is also append-only — if a check fails (API error), nothing is written. Retry next cycle.</p>
+      <p><strong>vix_at_check</strong> stored on every resolution — enables future regime analysis without reprocessing.</p>
+      <p><strong>SEC check</strong> only fires when new EDGAR data arrives for that ticker — not on a fixed date.</p>
+    </div>
+  </div>
+</div>
+
+<div style="padding: 1rem; background: rgba(255,255,255,0.04); border-radius: 8px; border-left: 3px solid #7c6cf0;">
+  <p class="label">Files on disk</p>
+  <p style="margin-top: 0.5rem; font-size: 0.85rem;">
+    <code>.raphi_audit/conviction_ledger/convictions.jsonl</code><br>
+    <code>.raphi_audit/conviction_ledger/resolutions.jsonl</code><br>
+    Same directory as <code>financial_decisions.jsonl</code> — already chmod 700.
+  </p>
+</div>
