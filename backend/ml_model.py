@@ -29,6 +29,23 @@ except ImportError:
 
 from sklearn.ensemble import GradientBoostingClassifier
 
+try:
+    from model_optimization import (
+        DistilledStudent,
+        ReinforcementPolicy,
+        predict_quantized_student,
+        quantize_student,
+        save_student_artifacts,
+    )
+except ImportError:
+    from backend.model_optimization import (
+        DistilledStudent,
+        ReinforcementPolicy,
+        predict_quantized_student,
+        quantize_student,
+        save_student_artifacts,
+    )
+
 MODEL_DIR = Path(__file__).parent.parent / ".model_cache"
 
 FEATURE_NAMES = [
@@ -187,6 +204,59 @@ class SignalEngine:
         # ── XGBoost + LSTM ensemble ─────────────────────────────────────
         ensemble_p = (xgb_p + lstm_p) / 2
 
+        # ── Distilled and quantized local student models ─────────────────
+        optimization_extra: dict = {}
+        try:
+            teacher_train = (
+                xgb_model.predict_proba(Xtr)[:, 1] +
+                lstm_model.predict_proba(Xtr)[:, 1]
+            ) / 2
+            student = DistilledStudent().fit(Xtr.values, teacher_train)
+
+            student_latest = DistilledStudent.predict_proba(student, latest.values)[0]
+            student_test = DistilledStudent.predict_proba(student, Xte.values)
+            student_acc = float(((student_test[:, 1] > 0.5).astype(int) == yte.values).mean())
+
+            qstudent = quantize_student(student)
+            quant_latest = predict_quantized_student(qstudent, latest.values)[0]
+            quant_test = predict_quantized_student(qstudent, Xte.values)
+            quant_acc = float(((quant_test[:, 1] > 0.5).astype(int) == yte.values).mean())
+            artifacts = save_student_artifacts(ticker, student, qstudent)
+
+            student_dir = (
+                "LONG" if student_latest[1] > 0.55 else
+                "SHORT" if student_latest[0] > 0.55 else "HOLD"
+            )
+            quant_dir = (
+                "LONG" if quant_latest[1] > 0.55 else
+                "SHORT" if quant_latest[0] > 0.55 else "HOLD"
+            )
+            optimization_extra.update({
+                "distilled_student": {
+                    "available": True,
+                    "teacher": "xgb_lstm_ensemble",
+                    "direction": student_dir,
+                    "confidence": round(float(max(student_latest)) * 100, 1),
+                    "accuracy": round(student_acc * 100, 1),
+                    "n_train": len(Xtr),
+                    "artifact": artifacts["student_path"],
+                },
+                "quantized_student": {
+                    "available": True,
+                    "bits": 8,
+                    "direction": quant_dir,
+                    "confidence": round(float(max(quant_latest)) * 100, 1),
+                    "accuracy": round(quant_acc * 100, 1),
+                    "size_bytes": qstudent["size_bytes"],
+                    "artifact": artifacts["quantized_path"],
+                },
+            })
+        except Exception as exc:
+            optimization_extra.update({
+                "distilled_student": {"available": False, "error": str(exc)},
+                "quantized_student": {"available": False, "error": str(exc)},
+            })
+
         # ── GNN ensemble (if model is already cached / trained) ────────
         gnn_extra: dict = {}
         try:
@@ -211,6 +281,22 @@ class SignalEngine:
                     }
         except Exception:
             pass
+
+        # ── Reinforcement policy from resolved conviction ledger ─────────
+        try:
+            rl = ReinforcementPolicy()
+            adjusted = rl.adjust_probabilities(ticker, ensemble_p)
+            ensemble_p = adjusted["probabilities"]
+            optimization_extra["rl_policy"] = {
+                "available": True,
+                "applied": adjusted.get("applied", False),
+                "bias": adjusted.get("bias", 0.0),
+                "q_values": adjusted.get("q_values", {}),
+                "updates": adjusted.get("updates", 0),
+                "source": "conviction_ledger_resolutions",
+            }
+        except Exception as exc:
+            optimization_extra["rl_policy"] = {"available": False, "error": str(exc)}
 
         direction  = ("LONG" if ensemble_p[1] > 0.55
                       else "SHORT" if ensemble_p[0] > 0.55
@@ -255,6 +341,7 @@ class SignalEngine:
             "trained_at":        pd.Timestamp.now().isoformat(),
             "n_train":           len(Xtr),
             **gnn_extra,         # gnn_direction, gnn_confidence, gnn_backend (if available)
+            **optimization_extra,
         }
         self._save(ticker, result)
         return result

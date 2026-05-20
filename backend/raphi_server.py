@@ -64,7 +64,17 @@ from security          import TokenAuth, init_sentry, sanitize_user_input
 from graph_memory      import GraphMemoryError, get_graph_memory
 from llm_guardrails    import GuardrailContext, validate_and_repair_response
 from conviction_store  import (
-    write_conviction, check_pending, get_accuracy_stats, get_ledger
+    CONVICTIONS_FILE,
+    RESOLUTIONS_FILE,
+    write_conviction,
+    check_pending,
+    get_accuracy_stats,
+    get_ledger,
+)
+from model_optimization import (
+    ReinforcementPolicy,
+    optimization_status,
+    optimize_from_conviction_ledger,
 )
 import raphi_mcp_server as mcp_bridge
 import edgar_live
@@ -1097,6 +1107,45 @@ def model_performance(request: Request):
         "avg_xgb_acc":  avg_xgb,
         "avg_lstm_acc": avg_lstm,
         "avg_ens_acc":  round((avg_xgb + avg_lstm) / 2, 1) if avg_xgb and avg_lstm else None,
+    }
+
+
+# ── local model optimization: RL, distillation, quantization ──────────
+@api.get("/models/optimization")
+@limiter.limit("60/minute")
+def models_optimization(request: Request):
+    return optimization_status()
+
+
+@api.post("/models/rl/update")
+@limiter.limit("20/minute")
+def models_rl_update(request: Request):
+    return optimize_from_conviction_ledger(CONVICTIONS_FILE, RESOLUTIONS_FILE)
+
+
+@api.get("/stock/{ticker}/optimization")
+@limiter.limit("60/minute")
+def stock_model_optimization(ticker: str, request: Request):
+    ticker = _ticker_symbol(ticker)
+    signal = _load_signal_payload(ticker)
+    policy = ReinforcementPolicy()
+    return {
+        "ticker": ticker,
+        "rl_policy": {
+            "available": True,
+            "q_values": policy.q_values(ticker),
+            "updates": int(policy.state.get("updates", 0)),
+            "source": "conviction_ledger_resolutions",
+            "latest_signal_adjustment": signal.get("rl_policy", {}),
+        },
+        "distilled_student": signal.get(
+            "distilled_student",
+            {"available": False, "reason": "no cached signal artifact yet"},
+        ),
+        "quantized_student": signal.get(
+            "quantized_student",
+            {"available": False, "reason": "no cached signal artifact yet"},
+        ),
     }
 
 

@@ -134,3 +134,27 @@ def test_memo_export_markdown_contains_sec_citations(monkeypatch):
     assert "RAPHI Memo Export: NVDA" in response.text
     assert "0001045810-25-000230" in response.text
     assert "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000230/" in response.text
+
+
+def test_model_optimization_status_endpoint_reports_real_surfaces():
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/models/optimization")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data) >= {"rl_policy", "distillation", "quantization"}
+    assert data["quantization"]["bits"] == 8
+
+
+def test_stock_optimization_endpoint_reports_policy_and_cached_artifact_state():
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/stock/NVDA/optimization")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ticker"] == "NVDA"
+    assert "q_values" in data["rl_policy"]
+    assert "distilled_student" in data
+    assert "quantized_student" in data

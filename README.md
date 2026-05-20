@@ -12,6 +12,7 @@ RAPHI is a local-first, agentic investment intelligence platform that combines l
 - Local SEC filing search and XBRL-derived financial extraction via `backend/sec_data.py`
 - XGBoost + GradientBoosting signal engine with SHAP-style explanations via `backend/ml_model.py`
 - Graph-based GNN signal engine via `backend/gnn_model.py`
+- Local reinforcement policy, model distillation, and int8 quantized signal artifacts via `backend/model_optimization.py`
 - Portfolio snapshot, VaR, Sharpe, alerts, and position management via `backend/portfolio_manager.py`
 - Conviction ledger via `backend/conviction_store.py`
 - Durable graph memory with Neo4j primary and local JSON fallback via `backend/graph_memory.py`
@@ -82,6 +83,9 @@ RAPHI is a local-first, agentic investment intelligence platform that combines l
 - NumPy
 - pandas
 - GraphSAGE-style GNN engine with optional PyTorch Geometric backend
+- Contextual bandit reinforcement policy trained from resolved conviction-ledger outcomes
+- Logistic student-model distillation from XGBoost + GradientBoosting ensemble probabilities
+- Int8 quantization for distilled student signal artifacts
 
 ### Memory and persistence
 
@@ -143,6 +147,8 @@ That means memory is still available even when Neo4j is offline. When Neo4j is u
 - market/fundamental/news TTL caches in `backend/market_data.py`
 - model artifact cache in `.model_cache/`
 - GNN state cache in `.model_cache/gnn_state.pkl`
+- distilled student artifacts in `.model_cache/optimization/`
+- int8 quantized student artifacts in `.model_cache/optimization/`
 
 ### Not implemented today
 
@@ -153,6 +159,37 @@ Practical interpretation:
 
 - The app streams quickly and reuses local data/model caches.
 - It does not currently implement true application-managed KV caching for the LLM itself.
+
+## Model Optimization Status
+
+RAPHI implements reinforcement learning, distillation, and quantization for its local signal stack.
+These features do not fine-tune, distill, or quantize the hosted LLM.
+
+### Reinforcement Learning
+
+- Implemented in `backend/model_optimization.py`
+- Type: contextual bandit-style Q policy
+- Training signal: resolved conviction-ledger outcomes from `convictions.jsonl` and `resolutions.jsonl`
+- Effect: adjusts LONG/SHORT signal probabilities using learned ticker/action rewards
+- API:
+  - `GET /api/models/optimization`
+  - `POST /api/models/rl/update`
+  - `GET /api/stock/{ticker}/optimization`
+
+### Distillation
+
+- Implemented in `backend/model_optimization.py`
+- Teacher: XGBoost + GradientBoosting ensemble soft probabilities from `backend/ml_model.py`
+- Student: compact logistic model trained on the teacher's probabilities
+- Artifacts: `.model_cache/optimization/{TICKER}_student.pkl`
+- Exposed in signal payloads under `distilled_student`
+
+### Quantization
+
+- Implemented in `backend/model_optimization.py`
+- Method: symmetric int8 quantization of distilled student weights
+- Artifacts: `.model_cache/optimization/{TICKER}_student_int8.json`
+- Exposed in signal payloads under `quantized_student`
 
 ## Guardrails Status
 
@@ -197,6 +234,7 @@ backend/
   llm_guardrails.py
   market_data.py
   ml_model.py
+  model_optimization.py
   portfolio_manager.py
   raphi_mcp_server.py
   raphi_server.py
@@ -298,6 +336,9 @@ Current repo test coverage includes:
 - `PUT /api/portfolio`
 - `GET /api/signals`
 - `GET /api/alerts`
+- `GET /api/models/optimization`
+- `POST /api/models/rl/update`
+- `GET /api/stock/{ticker}/optimization`
 - `POST /api/chat`
 - `POST /api/memo/{ticker}`
 - `GET /api/convictions/stats`
