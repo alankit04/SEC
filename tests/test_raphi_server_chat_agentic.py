@@ -319,8 +319,8 @@ def test_local_agent_context_formats_web_citations():
         "gnn": {"status": {}, "signal": {}},
         "portfolio": {"positions": []},
         "web_citations": {
-            "provider": "google_custom_search",
-            "source_note": "Google Programmable Search JSON API",
+            "provider": "firecrawl_search",
+            "source_note": "Firecrawl search fallback",
             "query": "ASST Strive news",
             "results": [{
                 "id": 1,
@@ -333,7 +333,7 @@ def test_local_agent_context_formats_web_citations():
     })
 
     assert "@web-citation-search" in text
-    assert "Google Programmable Search JSON API" in text
+    assert "Firecrawl search fallback" in text
     assert "[1] Strive update" in text
     assert "https://example.com/strive-update" in text
 

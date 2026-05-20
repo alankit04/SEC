@@ -56,8 +56,6 @@ MCP_SERVERS: dict[str, McpStdioServerConfig] = {
             # Figma MCP connection for design workflows
             "FIGMA_ACCESS_TOKEN": os.environ.get("FIGMA_ACCESS_TOKEN", ""),
             "FIGMA_FILE_KEY": os.environ.get("FIGMA_FILE_KEY", ""),
-            "GOOGLE_SEARCH_API_KEY": os.environ.get("GOOGLE_SEARCH_API_KEY", ""),
-            "GOOGLE_SEARCH_CX": os.environ.get("GOOGLE_SEARCH_CX", ""),
             "FIRECRAWL_API_KEY": os.environ.get("FIRECRAWL_API_KEY", ""),
         },
     }
@@ -114,7 +112,7 @@ Decision rule:
 - Real-time filing query (last 30/60/90 days, "latest", "just filed", 8-K events, insider Form 4) → call mcp__raphi__edgar_live_filings for the ticker
 - Filing content search (specific topic in filings, risk factors text, MD&A phrases) → call mcp__raphi__edgar_search_fulltext
 - Earnings transcript or analyst coverage narrative → call mcp__raphi__firecrawl_search with a targeted query; if user provides a direct URL → call mcp__raphi__firecrawl_scrape
-- Perplexity-style current/web citation request ("source this", "Google it", "cite links") → call mcp__raphi__web_citations, then cite results as [1], [2] with URLs
+- Perplexity-style current/web citation request ("source this", "cite links", "show evidence") → call mcp__raphi__web_citations, then cite results as [1], [2] with URLs
 - Multi-source analysis or investment recommendation → delegate to @memo-synthesizer
 
 Always cite specific data points and accession numbers when available. Use institutional investment language.

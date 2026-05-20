@@ -701,7 +701,6 @@ class WebCitationRequest(BaseModel):
     query: str
     ticker: str = ""
     limit: int = 5
-    prefer_google: bool = True
 
 
 @api.post("/firecrawl/scrape")
@@ -732,14 +731,13 @@ def firecrawl_search_route(body: FirecrawlSearchRequest, request: Request):
 @api.post("/web/citations")
 @limiter.limit("20/minute")
 def web_citations_route(body: WebCitationRequest, request: Request):
-    """Google-style web citation search for Perplexity-like sourced answers."""
+    """Firecrawl-backed web citation search for Perplexity-like sourced answers."""
     ticker = _ticker_symbol(body.ticker) if body.ticker else ""
     limit = min(max(int(body.limit), 1), 10)
     result = web_citations.search_citations(
         body.query,
         ticker=ticker,
         limit=limit,
-        prefer_google=bool(body.prefer_google),
     )
     if result.get("error") and not result.get("results"):
         raise HTTPException(502, result["error"])
@@ -1492,7 +1490,7 @@ def _agentic_plan(message: str, ticker: str) -> list[dict]:
     if _re.search(r"\b(ml|model|signal|gnn|graph|peer|neighbor|risk|investable|recommend|analyze|analysis)\b", text):
         steps.append({"id": "models", "label": "Check cached ML signal and GNN relationship layer"})
     steps.extend([
-        {"id": "web", "label": "Fetch Google-style web citations for current narrative/source claims"},
+        {"id": "web", "label": "Fetch web citations for current narrative/source claims"},
         {"id": "portfolio", "label": "Compute portfolio exposure, P&L, VaR, and Sharpe context"},
         {"id": "memory", "label": "Retrieve episodic memory for prior ticker/thread context"},
         {"id": "synthesis", "label": "Synthesize answer with evidence, uncertainty, and trade/risk framing"},
@@ -1656,7 +1654,7 @@ def _collect_local_agent_context(
             ctx["firecrawl"]["analyst_error"] = str(exc)
 
     want_web_citations = bool(_re.search(
-        r"\b(source|sources|citation|citations|cite|google|perplexity|web|news|latest|recent|analyst|transcript|article|why|how|evidence)\b",
+        r"\b(source|sources|citation|citations|cite|perplexity|web|news|latest|recent|analyst|transcript|article|why|how|evidence)\b",
         lower,
         _re.I,
     ))
@@ -2158,7 +2156,7 @@ Presentation rules for the RAPHI web console:
                 ("sec",          "@sec-researcher loaded local SEC filing history and XBRL when requested"),
                 ("signals",      "@ml-signals checked cached XGBoost/LSTM signal output"),
                 ("gnn",          "@gnn-influence checked graph status and neighbor influence"),
-                ("web",          "@web-citation-search fetched Google-style web citation results when requested"),
+                ("web",          "@web-citation-search fetched web citation results when requested"),
                 ("portfolio",    "@portfolio-risk computed exposure, P&L, VaR, and Sharpe"),
                 ("synthesize",   "@memo-synthesizer combining specialist outputs with guardrails"),
             ]

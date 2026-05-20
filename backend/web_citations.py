@@ -1,31 +1,16 @@
-"""
-web_citations.py — Perplexity-style web citation search.
-
-Primary provider:
-  - Google Programmable Search JSON API
-    https://developers.google.com/custom-search/v1
-
-Fallback provider:
-  - Firecrawl search, when Google credentials are absent.
-"""
+"""web_citations.py — Perplexity-style web citation search via Firecrawl."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import os
 import time
 from urllib.parse import urlparse
-
-import httpx
 
 try:
     import firecrawl_client
 except ImportError:  # pragma: no cover
     from backend import firecrawl_client
 
-_GOOGLE_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY", "").strip()
-_GOOGLE_CX = os.environ.get("GOOGLE_SEARCH_CX", "").strip()
-_GOOGLE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 _SEARCH_TTL = 900
 _cache: dict[str, tuple[float, dict]] = {}
 
@@ -53,38 +38,11 @@ def _store(key: str, value: dict) -> dict:
     return value
 
 
-def google_configured() -> bool:
-    return bool(_GOOGLE_API_KEY and _GOOGLE_CX)
-
-
 def provider_status() -> dict:
     return {
-        "google_configured": google_configured(),
         "firecrawl_configured": firecrawl_client.is_available(),
-        "primary_provider": "google_custom_search" if google_configured() else "firecrawl_search",
-        "required_google_env": ["GOOGLE_SEARCH_API_KEY", "GOOGLE_SEARCH_CX"],
-    }
-
-
-def _normalize_google_item(item: dict, idx: int) -> dict:
-    pagemap = item.get("pagemap") or {}
-    metatags = (pagemap.get("metatags") or [{}])[0] if isinstance(pagemap.get("metatags"), list) else {}
-    url = item.get("link", "")
-    return {
-        "id": idx,
-        "title": item.get("title", ""),
-        "url": url,
-        "domain": _domain(url),
-        "snippet": item.get("snippet", ""),
-        "display_link": item.get("displayLink", ""),
-        "published": (
-            metatags.get("article:published_time")
-            or metatags.get("og:updated_time")
-            or metatags.get("date")
-            or ""
-        ),
-        "provider": "Google Programmable Search",
-        "retrieved_at": _now_iso(),
+        "primary_provider": "firecrawl_search",
+        "required_env": ["FIRECRAWL_API_KEY"],
     }
 
 
@@ -110,7 +68,6 @@ def search_citations(
     *,
     ticker: str = "",
     limit: int = 5,
-    prefer_google: bool = True,
 ) -> dict:
     clean_query = " ".join(str(query or "").split())[:500]
     ticker = str(ticker or "").strip().upper()
@@ -120,47 +77,10 @@ def search_citations(
     if not clean_query:
         return {"provider": "none", "query": clean_query, "results": [], "count": 0, "error": "query is required"}
 
-    cache_key = f"{clean_query}:{ticker}:{limit}:{prefer_google}:{google_configured()}"
+    cache_key = f"{clean_query}:{ticker}:{limit}:firecrawl"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
-
-    if prefer_google and google_configured():
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.get(
-                    _GOOGLE_ENDPOINT,
-                    params={
-                        "key": _GOOGLE_API_KEY,
-                        "cx": _GOOGLE_CX,
-                        "q": clean_query,
-                        "num": limit,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            results = [
-                _normalize_google_item(item, idx)
-                for idx, item in enumerate(data.get("items") or [], start=1)
-            ]
-            return _store(cache_key, {
-                "provider": "google_custom_search",
-                "query": clean_query,
-                "results": results,
-                "count": len(results),
-                "retrieved_at": _now_iso(),
-                "source_note": "Google Programmable Search JSON API",
-            })
-        except Exception as exc:
-            if not firecrawl_client.is_available():
-                return _store(cache_key, {
-                    "provider": "google_custom_search",
-                    "query": clean_query,
-                    "results": [],
-                    "count": 0,
-                    "error": str(exc),
-                    "retrieved_at": _now_iso(),
-                })
 
     if firecrawl_client.is_available():
         results_raw = firecrawl_client.search_web(clean_query, limit=limit, scrape_results=True, max_chars_per_result=1600)
@@ -185,6 +105,6 @@ def search_citations(
         "query": clean_query,
         "results": [],
         "count": 0,
-        "error": "No web citation provider configured. Set GOOGLE_SEARCH_API_KEY + GOOGLE_SEARCH_CX or FIRECRAWL_API_KEY.",
+        "error": "No web citation provider configured. Set FIRECRAWL_API_KEY.",
         "retrieved_at": _now_iso(),
     })

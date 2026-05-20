@@ -484,9 +484,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="web_citations",
             description=(
-                "Perplexity-style web citation search. Uses Google Programmable Search "
-                "when GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX are configured, otherwise "
-                "falls back to Firecrawl search. Returns title, snippet, URL, provider, and retrieved_at."
+                "Perplexity-style web citation search via Firecrawl. "
+                "Returns title, snippet, URL, provider, and retrieved_at."
             ),
             inputSchema={
                 "type": "object",
@@ -503,11 +502,6 @@ async def list_tools() -> list[types.Tool]:
                         "description": "Number of citation results to return.",
                         "minimum": 1,
                         "maximum": 10,
-                    },
-                    "prefer_google": {
-                        "type": "boolean",
-                        "default": True,
-                        "description": "Use Google first when configured.",
                     },
                 },
                 "required": ["query"],
@@ -724,7 +718,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     "query": query,
                     "ticker": ticker,
                     "limit": limit,
-                    "prefer_google": bool(arguments.get("prefer_google", True)),
                 })
 
             else:
