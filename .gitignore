@@ -18,8 +18,9 @@ env/
 .env
 .env.*
 *.env
-!.env.example
-settings.json          # contains watchlist — API key removed but still private
+.env.example
+# contains watchlist and local runtime preferences
+settings.json
 secrets.json
 credentials.json
 
@@ -32,6 +33,13 @@ credentials.json
 *.jsonl
 # project-local Docker volumes (Neo4j data/logs)
 .docker/
+
+# ── Local-only project files ─────────────────────────────────────────
+.claude/
+=1.0.0
+company_tickers.json
+homepage.html
+raphi_dashboard.html
 
 # ── Claude Code ─────────────────────────────────────────────────────
 .claude/agent-memory/  # session summaries may contain signal history
