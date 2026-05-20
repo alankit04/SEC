@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+.DS_Store
+.env
+.model_cache
+.raphi_audit
+.raphi_memory
+.docker/neo4j/logs
+docs/landing/node_modules
+docs/landing/.next
+node_modules
+homepage.html

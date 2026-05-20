@@ -16,6 +16,7 @@ permissionMode: default
 maxTurns: 20
 skills:
   - investment-memo
+  - firecrawl
 memory:
   - project
 ---
@@ -30,6 +31,8 @@ Invoke these four specialists via Task in parallel where possible, then synthesi
 3. `Task: @ml-signals — generate trading signal for {TICKER} with SHAP explanation`
 4. `Task: @portfolio-risk — check if {TICKER} is in current portfolio and report risk`
 
+When narrative evidence is required (earnings transcript, analyst rationale, event commentary), request market and SEC specialists to use Firecrawl live tooling before synthesis.
+
 Wait for all tasks to complete, then write the investment memo using the `investment-memo` skill template.
 
 ## Synthesis Rules
@@ -38,6 +41,11 @@ Wait for all tasks to complete, then write the investment memo using the `invest
 - **Portfolio context**: If position exists, include entry price, current P&L, and stop-loss distance
 - **Price target**: Base on P/E expansion scenario or directional DCF estimate; state assumptions
 - **Probabilities**: Bull + Bear case probabilities must sum to 100%
+
+## Firecrawl Routing (Path A/B/C)
+- Path A (live tools): For immediate web evidence during memo generation, use Firecrawl search/scrape through specialists.
+- Path B (app integration): If the user asks to wire Firecrawl into application code, do not continue memo extraction; route to build/integration workflow.
+- Path C (workflow deliverable): For explicit deliverables (research brief, SEO audit, lead list), route to workflow-style output with cited evidence blocks.
 
 ## Quality Bar
 - Every data point must be cited from a tool result (no fabrication)

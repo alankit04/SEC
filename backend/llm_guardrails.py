@@ -23,7 +23,7 @@ REQUIRED_MEMO_SECTIONS = [
 
 GUARANTEE_PATTERNS = [
     (re.compile(r"\bwill\s+definitely\b", re.IGNORECASE), "may"),
-    (re.compile(r"\bguaranteed?\b", re.IGNORECASE), "uncertain"),
+    (re.compile(r"(?<!not )\bguaranteed?\b", re.IGNORECASE), "uncertain"),
     (re.compile(r"\brisk[-\s]?free\b", re.IGNORECASE), "lower-risk"),
     (re.compile(r"\bcannot\s+lose\b", re.IGNORECASE), "can still lose money"),
     (re.compile(r"\bsure\s+thing\b", re.IGNORECASE), "high-conviction but uncertain setup"),
@@ -35,7 +35,22 @@ COMMON_ACRONYMS = {
     "GNN", "GPU", "HTTP", "IPO", "JSON",
     "LLM", "MCP", "ML", "NASDAQ", "NYSE", "PCE", "PE", "RAG", "ROIC", "SEC",
     "SSE", "TTM", "UI", "USD", "VAR", "VIX", "XBRL",
-    "BUY", "SELL", "HOLD", "LONG", "SHORT",
+    "BUY", "SELL", "HOLD", "LONG", "SHORT", "RAPHI",
+    # Finance / market abbreviations commonly appearing in AI-generated analysis
+    "RSI", "EV", "ESG", "HFT", "NAV", "SPX", "YTD", "OPEX", "WACC", "PMI",
+    "ISM", "OEM", "FED", "TAM", "EBIT",
+    # Tech / chip / AI product terms
+    "CUDA", "FSD", "GPU",
+    # SEC form abbreviations
+    "DEF", "HR", "FORM",
+    # Generic English words and web/data terms that regex would match
+    "URL", "CSV", "PDF", "XBRL",
+}
+
+COMMON_MARKET_REFERENCES = {
+    "BTC", "ETH", "SPY", "QQQ", "TLT", "GLD", "DXY",
+    # Peer references commonly cited in AI/chip/EV analysis
+    "TSMC", "ARM",
 }
 
 
@@ -86,7 +101,12 @@ def find_missing_memo_sections(text: str) -> list[str]:
 def find_unknown_tickers(text: str, allowed_tickers: Iterable[str]) -> list[str]:
     allowed = {t.upper() for t in allowed_tickers if t}
     tokens = set(re.findall(r"\b[A-Z]{2,5}\b", text))
-    unknown = sorted(t for t in tokens if t not in allowed and t not in COMMON_ACRONYMS)
+    unknown = sorted(
+        t for t in tokens
+        if t not in allowed
+        and t not in COMMON_ACRONYMS
+        and t not in COMMON_MARKET_REFERENCES
+    )
     return unknown[:12]
 
 

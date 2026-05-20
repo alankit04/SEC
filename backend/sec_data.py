@@ -38,6 +38,37 @@ FINANCIAL_TAGS = {
     "CashAndCashEquivalentsAtCarryingValue": "cash",
 }
 
+SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
+SEC_DATASETS_SOURCE = "SEC Financial Statement Data Sets"
+
+
+def _clean_sec_date(value) -> str:
+    raw = str(value or "").split(".")[0]
+    if re.match(r"^\d{8}$", raw):
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+    return raw
+
+
+def sec_accession_url(cik: str, adsh: str) -> str:
+    accession = str(adsh or "").replace("-", "")
+    cik_clean = str(cik or "").lstrip("0")
+    if not cik_clean or not accession:
+        return ""
+    return f"{SEC_ARCHIVES_BASE}/{cik_clean}/{accession}/"
+
+
+def filing_citation(cik: str, adsh: str, form: str = "", filed: str = "", period: str = "", quarter: str = "") -> dict:
+    return {
+        "source": SEC_DATASETS_SOURCE,
+        "cik": str(cik or ""),
+        "accession": str(adsh or ""),
+        "form": str(form or ""),
+        "filed": _clean_sec_date(filed),
+        "period": _clean_sec_date(period),
+        "quarter": str(quarter or ""),
+        "sec_url": sec_accession_url(str(cik or ""), str(adsh or "")),
+    }
+
 SIC_INDUSTRIES = {
     "01":"Agriculture","08":"Forestry","10":"Mining","12":"Coal Mining",
     "13":"Oil & Gas","14":"Stone/Clay/Glass","15":"Building Contractors",
@@ -133,10 +164,20 @@ class SECData:
             for _, row in rows.iterrows():
                 results.append({
                     "adsh":    str(row.get("adsh", "")),
+                    "accession": str(row.get("adsh", "")),
                     "form":    str(row.get("form", "")),
-                    "filed":   str(row.get("filed", "")),
-                    "period":  str(row.get("period", "")),
+                    "filed":   _clean_sec_date(row.get("filed", "")),
+                    "period":  _clean_sec_date(row.get("period", "")),
                     "quarter": q,
+                    "sec_url": sec_accession_url(cik, str(row.get("adsh", ""))),
+                    "citation": filing_citation(
+                        cik=cik,
+                        adsh=str(row.get("adsh", "")),
+                        form=str(row.get("form", "")),
+                        filed=str(row.get("filed", "")),
+                        period=str(row.get("period", "")),
+                        quarter=q,
+                    ),
                 })
             if len(results) >= limit:
                 break
@@ -374,8 +415,17 @@ class SECData:
                         else ddate
                     )
                     filing = filing_by_adsh.get(str(row.get("adsh", "")), {})
+                    citation = filing_citation(
+                        cik=cik,
+                        adsh=str(row.get("adsh", "")),
+                        form=filing.get("form", ""),
+                        filed=filing.get("filed", ""),
+                        period=period,
+                        quarter=q,
+                    )
                     entries.append({
                         "adsh": str(row.get("adsh", "")),
+                        "accession": str(row.get("adsh", "")),
                         "form": filing.get("form", ""),
                         "filed": filing.get("filed", ""),
                         "period": period,
@@ -385,6 +435,8 @@ class SECData:
                         "uom": str(row.get("uom", "")),
                         "qtrs": int(row.get("qtrs", 0) or 0),
                         "val": val,
+                        "sec_url": citation["sec_url"],
+                        "citation": citation,
                     })
 
             if entries:
@@ -403,6 +455,21 @@ class SECData:
         for entry in self.company_financial_entries(ticker):
             metrics.setdefault(entry["metric"], entry["val"])
         return metrics
+
+    def company_financial_citations(self, ticker: str) -> dict:
+        """Return first source citation per extracted financial metric."""
+        citations: dict = {}
+        for entry in self.company_financial_entries(ticker):
+            metric = entry.get("metric")
+            citation = entry.get("citation")
+            if metric and citation and metric not in citations:
+                citations[metric] = {
+                    **citation,
+                    "tag": entry.get("tag", ""),
+                    "value": entry.get("val"),
+                    "unit": entry.get("uom", ""),
+                }
+        return citations
 
     # ------------------------------------------------------------------
     def summary_stats(self) -> dict:

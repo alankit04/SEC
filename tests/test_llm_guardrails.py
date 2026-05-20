@@ -24,6 +24,19 @@ def test_guardrails_repair_overconfidence_and_add_risk_context():
     assert report.repairs
 
 
+def test_guardrails_do_not_rewrite_not_guaranteed():
+    text = "HOLD ASST. Investment outcomes are not guaranteed and downside risk remains."
+
+    repaired, report = validate_and_repair_response(
+        text,
+        GuardrailContext(ticker="ASST", allowed_tickers={"ASST"}),
+    )
+
+    assert "not guaranteed" in repaired
+    assert "not uncertain" not in repaired
+    assert not report.repairs
+
+
 def test_guardrails_enforce_memo_sections():
     text = "### Recommendation\nHOLD NVDA with 55% confidence.\n\n### Risks\n- Multiple compression."
 
@@ -53,3 +66,24 @@ def test_guardrails_allow_financial_acronyms():
     assert "Unverified ticker references" not in repaired
     assert "EPS" not in report.unknown_tickers
     assert "FCF" not in report.unknown_tickers
+
+
+def test_guardrails_allow_common_market_references():
+    repaired, report = validate_and_repair_response(
+        "ASST has Bitcoin treasury exposure, so BTC sentiment and SPY risk matter.",
+        GuardrailContext(ticker="ASST", allowed_tickers={"ASST"}),
+    )
+
+    assert "Unverified ticker references" not in repaired
+    assert "BTC" not in report.unknown_tickers
+    assert "SPY" not in report.unknown_tickers
+
+
+def test_guardrails_allow_raphi_brand_name():
+    repaired, report = validate_and_repair_response(
+        "RAPHI says HOLD ASST, but downside risk remains.",
+        GuardrailContext(ticker="ASST", allowed_tickers={"ASST"}),
+    )
+
+    assert "Unverified ticker references" not in repaired
+    assert "RAPHI" not in report.unknown_tickers

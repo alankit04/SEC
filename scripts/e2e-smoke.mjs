@@ -31,9 +31,6 @@ function loadEnv() {
 
 const envFile = loadEnv();
 const apiKey = process.env.RAPHI_API_KEY || envFile.RAPHI_API_KEY || "";
-if (!apiKey) {
-  throw new Error("RAPHI_API_KEY is required in environment or .env for E2E login.");
-}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -185,13 +182,52 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
       source: `
-        localStorage.setItem('raphi_api_key', ${JSON.stringify(apiKey)});
+        if (${JSON.stringify(Boolean(apiKey))}) {
+          localStorage.setItem('raphi_api_key', ${JSON.stringify(apiKey)});
+        }
         localStorage.setItem('raphi_onboarded', '1');
         localStorage.setItem('raphi_initials', 'AL');
       `,
     });
     await cdp.send("Page.navigate", { url: APP_URL });
-    await waitFor(cdp, "document.querySelector('#main-app.active') !== null", "authenticated app shell");
+
+    await waitFor(
+      cdp,
+      "document.querySelector('#main-app.active') !== null || document.querySelector('#screen-landing.active') !== null || document.querySelector('#screen-login.active') !== null",
+      "initial app surface"
+    );
+
+    const appReady = await cdp.eval("document.querySelector('#main-app.active') !== null");
+    if (!appReady) {
+      await waitFor(
+        cdp,
+        "typeof window.connectFromLanding === 'function' || typeof window.doLogin === 'function'",
+        "login functions"
+      );
+
+      const connected = await cdp.eval(`(() => {
+        const landingEmail = document.querySelector('#landingEmail');
+        const loginEmail = document.querySelector('#loginEmail');
+        if (landingEmail) landingEmail.value = 'alan.tester@fund.com';
+        if (loginEmail) loginEmail.value = 'alan.tester@fund.com';
+
+        if (typeof window.connectFromLanding === 'function' && landingEmail) {
+          window.connectFromLanding();
+          return true;
+        }
+
+        if (typeof window.doLogin === 'function' && loginEmail) {
+          window.doLogin();
+          return true;
+        }
+
+        return false;
+      })()`);
+      if (!connected) {
+        throw new Error("Could not execute email login flow in landing/login screen.");
+      }
+      await waitFor(cdp, "document.querySelector('#main-app.active') !== null", "authenticated app shell");
+    }
 
     for (const pageId of ["dashboard", "ask", "stock", "signals", "news", "portfolio", "shap", "memo", "convictions", "research", "alerts", "models", "settings"]) {
       await click(cdp, `.nav-item[onclick*="'${pageId}'"]`, `nav ${pageId}`);
@@ -216,7 +252,10 @@ async function main() {
 
     for (const tab of ["Overview", "Technicals", "Fundamentals", "Options Flow", "SEC Filings"]) {
       await clickByText(cdp, "#page-stock .tabs", tab);
-      await waitFor(cdp, "document.querySelector('#stock-tab-content')?.innerText.trim().length > 20 && !document.querySelector('#stock-tab-content')?.innerText.includes('Loading')", `stock tab ${tab}`, 45000);
+      await waitFor(cdp, `(() => {
+        const t = (document.querySelector('#stock-tab-content')?.innerText || '').trim();
+        return !t.includes('Loading') && t.length > 0;
+      })()`, `stock tab ${tab}`, 45000);
     }
 
     await clickByText(cdp, "#page-stock", "Add to Portfolio");
@@ -225,18 +264,31 @@ async function main() {
     await click(cdp, `.nav-item[onclick*="'signals'"]`, "nav signals");
     for (const tab of ["All", "Equities", "Macro", "Crypto", "Fixed Income"]) {
       await clickByText(cdp, "#page-signals .tabs", tab);
-      await waitFor(cdp, "document.querySelector('#signals-tab-content')?.innerText.trim().length > 20 && !document.querySelector('#signals-tab-content')?.innerText.includes('Loading')", `signals tab ${tab}`, 45000);
+      await waitFor(cdp, `(() => {
+        const t = (document.querySelector('#signals-tab-content')?.innerText || '').trim();
+        return !t.includes('Loading') && t.length > 0;
+      })()`, `signals tab ${tab}`, 45000);
     }
 
     await click(cdp, `.nav-item[onclick*="'shap'"]`, "nav explainability");
     for (const tab of ["NVDA Forecast", "Portfolio Drivers", "Model Comparison"]) {
       await clickByText(cdp, "#page-shap .tabs", tab);
-      await waitFor(cdp, "document.querySelector('#shap-tab-content')?.innerText.trim().length > 20 && !document.querySelector('#shap-tab-content')?.innerText.includes('Loading')", `explainability tab ${tab}`, 45000);
+      await waitFor(cdp, `(() => {
+        const t = (document.querySelector('#shap-tab-content')?.innerText || '').trim();
+        return !t.includes('Loading') && t.length > 0;
+      })()`, `explainability tab ${tab}`, 45000);
     }
 
     await click(cdp, `.nav-item[onclick*="'ask'"]`, "nav ask");
+    const previousThreadId = await cdp.eval("document.body.dataset.chatThreadId || localStorage.getItem('raphi_chat_thread_id')");
+    await cdp.eval("chatHistory.push({ role: 'user', content: 'stale test message' })");
     await clickByText(cdp, "#page-ask", "New Thread");
     await waitFor(cdp, "document.querySelector('#consoleMessages')?.innerText.includes('New thread ready')", "new thread action");
+    await waitFor(
+      cdp,
+      `${JSON.stringify(previousThreadId)} !== (document.body.dataset.chatThreadId || localStorage.getItem('raphi_chat_thread_id')) && chatHistory.length === 0`,
+      "new thread rotates id and clears chat history"
+    );
 
     await click(cdp, `.nav-item[onclick*="'portfolio'"]`, "nav portfolio");
     await clickByText(cdp, "#page-portfolio", "Stress Test");

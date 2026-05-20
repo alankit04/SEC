@@ -133,6 +133,8 @@ class MarketData:
             result = {
                 "ticker":        ticker.upper(),
                 "name":          info.get("longName", ticker),
+                "source":        "Yahoo Finance via yfinance",
+                "quote_url":     f"https://finance.yahoo.com/quote/{ticker.upper()}",
                 "price":         round(cur, 2),
                 "change":        round(chg, 2),
                 "pct":           round(pct, 2),
@@ -185,6 +187,7 @@ class MarketData:
 
                 news.append({
                     "title":     title,
+                    "source":    "Yahoo Finance news via yfinance",
                     "publisher": item.get("publisher", ""),
                     "url":       item.get("link", "#"),
                     "sentiment": sentiment,

@@ -34,9 +34,10 @@ import sys
 from pathlib import Path
 
 import uvicorn
+import pandas as pd
 from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -65,6 +66,10 @@ from llm_guardrails    import GuardrailContext, validate_and_repair_response
 from conviction_store  import (
     write_conviction, check_pending, get_accuracy_stats, get_ledger
 )
+import raphi_mcp_server as mcp_bridge
+import edgar_live
+import firecrawl_client
+import web_citations
 
 # ── Initialise Sentry before anything else ───────────────────────────
 init_sentry()
@@ -75,6 +80,18 @@ STATIC_DIR = Path(__file__).parent / "static"
 SETTINGS_FILE     = BASE / "settings.json"
 DEFAULT_WATCHLIST = ["NVDA", "AAPL", "MSFT", "META", "TSLA", "AMZN", "GOOGL"]
 TICKER_RE         = re.compile(r"^[A-Z]{1,5}$")
+
+TICKER_IDENTITY_OVERRIDES = {
+    "ASST": {
+        "current_name": "Strive, Inc.",
+        "former_name": "Asset Entities Inc.",
+        "identity_note": (
+            "ASST is Strive, Inc. after the Asset Entities / Strive merger; "
+            "legacy SEC and market metadata may still reference Asset Entities Inc."
+        ),
+        "strategy_note": "Public Bitcoin treasury / asset-management strategy.",
+    }
+}
 
 # ── Data singletons ───────────────────────────────────────────────────
 market    = MarketData()
@@ -218,6 +235,43 @@ def dashboard():
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+class MCPBridgeRequest(BaseModel):
+    tool: str
+    arguments: dict = Field(default_factory=dict)
+
+
+@app.post("/mcp")
+async def mcp_bridge_call(body: MCPBridgeRequest):
+    """Bridge HTTP /mcp requests to the stdio MCP tool implementations."""
+    raw_tool = str(body.tool or "").strip()
+    if not raw_tool:
+        raise HTTPException(422, "tool is required")
+
+    tool_name = raw_tool
+    if tool_name.startswith("mcp__raphi__"):
+        tool_name = tool_name[len("mcp__raphi__"):]
+
+    try:
+        contents = await mcp_bridge.call_tool(tool_name, body.arguments or {})
+    except Exception as exc:
+        raise HTTPException(422, str(exc))
+
+    text_chunks: list[str] = [
+        getattr(item, "text", "")
+        for item in contents
+        if getattr(item, "text", "")
+    ]
+    text = "\n".join(text_chunks).strip()
+    if not text:
+        return {"tool": raw_tool, "result": None}
+
+    try:
+        parsed = json.loads(text)
+        return {"tool": raw_tool, "result": parsed}
+    except Exception:
+        return {"tool": raw_tool, "result": {"text": text}}
+
+
 # ══════════════════════════════════════════════════════════════════════
 # DATA API SUB-ROUTER  (/api/*)
 # ══════════════════════════════════════════════════════════════════════
@@ -226,6 +280,8 @@ api = APIRouter(prefix="/api", tags=["data"])
 
 # ── helpers ───────────────────────────────────────────────────────────
 def _sse(event: str, data: str) -> str:
+    if event == "token":
+        data = json.dumps(str(data))
     return f"event: {event}\ndata: {data}\n\n"
 
 
@@ -264,6 +320,27 @@ def _watchlist() -> list[str]:
     return tickers or DEFAULT_WATCHLIST
 
 
+def _ticker_identity(ticker: str) -> dict:
+    ticker = _ticker_symbol(ticker)
+    return TICKER_IDENTITY_OVERRIDES.get(ticker, {"current_name": ticker})
+
+
+def _apply_ticker_identity(ticker: str, detail: dict | None) -> dict:
+    ticker = _ticker_symbol(ticker)
+    detail = dict(detail or {})
+    identity = _ticker_identity(ticker)
+    if ticker in TICKER_IDENTITY_OVERRIDES:
+        original_name = detail.get("name") or detail.get("longName") or ""
+        detail["name"] = identity["current_name"]
+        detail["current_name"] = identity["current_name"]
+        detail["former_name"] = identity.get("former_name")
+        detail["identity_note"] = identity.get("identity_note")
+        detail["strategy_note"] = identity.get("strategy_note")
+        if original_name and original_name != identity["current_name"]:
+            detail["provider_name"] = original_name
+    return detail
+
+
 def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None) -> list[str]:
     universe: list[str] = []
     seen: set[str] = set()
@@ -275,6 +352,51 @@ def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None) ->
     if len(universe) < 2:
         raise HTTPException(422, "GNN needs at least 2 valid tickers.")
     return universe
+
+
+def _register_ticker_for_agentic_analysis(ticker: str) -> dict:
+    """Persist a newly requested ticker and attempt to include it in the GNN graph."""
+    ticker = _ticker_symbol(ticker)
+    settings = _load_settings()
+    watchlist = []
+    seen = set()
+    for raw in settings.get("watchlist", DEFAULT_WATCHLIST):
+        try:
+            symbol = _ticker_symbol(raw)
+        except HTTPException:
+            continue
+        if symbol not in seen:
+            watchlist.append(symbol)
+            seen.add(symbol)
+
+    added = ticker not in seen
+    if added:
+        watchlist.append(ticker)
+        settings["watchlist"] = watchlist
+        settings.setdefault("auto_added_tickers", [])
+        if ticker not in settings["auto_added_tickers"]:
+            settings["auto_added_tickers"].append(ticker)
+        settings.setdefault("ticker_identities", {})
+        if ticker in TICKER_IDENTITY_OVERRIDES:
+            settings["ticker_identities"][ticker] = TICKER_IDENTITY_OVERRIDES[ticker]
+        _save_settings(settings)
+
+    universe = _gnn_universe(ticker, requested=watchlist)
+    result = {
+        "ticker": ticker,
+        "added_to_watchlist": added,
+        "universe": universe,
+        "gnn_added": False,
+        "gnn_status": {},
+    }
+    try:
+        gnn.ensure_trained(universe)
+        status = gnn.status()
+        result["gnn_status"] = status
+        result["gnn_added"] = ticker in set(status.get("tickers", []))
+    except Exception as exc:
+        result["gnn_error"] = str(exc)
+    return result
 
 
 def _save_settings(s: dict) -> None:
@@ -402,7 +524,8 @@ def market_overview(request: Request):
 @api.get("/stock/{ticker}")
 @limiter.limit("60/minute")
 def stock_detail(ticker: str, request: Request):
-    data = market.stock_detail(ticker.upper())
+    ticker = _ticker_symbol(ticker)
+    data = _apply_ticker_identity(ticker, market.stock_detail(ticker))
     if "error" in data:
         raise HTTPException(404, data["error"])
     return data
@@ -501,11 +624,116 @@ def gnn_train(request: Request, bg: BackgroundTasks, body: Optional[GNNTrainRequ
 @limiter.limit("60/minute")
 def stock_filings(ticker: str, request: Request):
     ticker = _ticker_symbol(ticker)
+    filings = sec.ticker_filings(ticker)
+    financials = sec.company_financials(ticker)
+    financial_citations = sec.company_financial_citations(ticker)
     return {
         "cik":        sec.cik_for_ticker(ticker),
-        "filings":    sec.ticker_filings(ticker),
-        "financials": sec.company_financials(ticker),
+        "filings":    filings,
+        "financials": financials,
+        "financial_citations": financial_citations,
+        "citation_count": len(financial_citations) + len(filings),
+        "source": "SEC Financial Statement Data Sets and SEC EDGAR Archives",
     }
+
+
+@api.get("/stock/{ticker}/live-filings")
+@limiter.limit("30/minute")
+def stock_live_filings(ticker: str, request: Request, days: int = 60):
+    """Real-time SEC EDGAR filings: 10-K, 10-Q, 8-K, Form 4 from data.sec.gov."""
+    ticker = _ticker_symbol(ticker)
+    days = min(max(int(days), 1), 365)
+    try:
+        summary = edgar_live.get_ticker_live_summary(ticker, days=days)
+        return summary
+    except Exception as exc:
+        raise HTTPException(502, f"EDGAR live fetch failed: {exc}")
+
+
+@api.get("/edgar/search")
+@limiter.limit("20/minute")
+def edgar_fulltext_search(
+    request: Request,
+    query: str,
+    ticker: Optional[str] = None,
+    forms: Optional[str] = None,
+    days: int = 90,
+    limit: int = 8,
+):
+    """Full-text search across all EDGAR filings via EFTS."""
+    days = min(max(int(days), 1), 365)
+    limit = min(max(int(limit), 1), 20)
+    form_list = [f.strip() for f in forms.split(",")] if forms else None
+    try:
+        results = edgar_live.search_filings_fulltext(
+            query[:300],
+            ticker=ticker.strip().upper() if ticker else None,
+            forms=form_list,
+            days=days,
+            limit=limit,
+        )
+        return {"results": results, "count": len(results)}
+    except Exception as exc:
+        raise HTTPException(502, f"EDGAR search failed: {exc}")
+
+
+class FirecrawlScrapeRequest(BaseModel):
+    url: str
+    max_chars: int = 6000
+
+
+class FirecrawlSearchRequest(BaseModel):
+    query: str
+    limit: int = 5
+
+
+class WebCitationRequest(BaseModel):
+    query: str
+    ticker: str = ""
+    limit: int = 5
+    prefer_google: bool = True
+
+
+@api.post("/firecrawl/scrape")
+@limiter.limit("10/minute")
+def firecrawl_scrape_route(body: FirecrawlScrapeRequest, request: Request):
+    """Scrape a URL via Firecrawl and return clean markdown."""
+    if not body.url.startswith("https://"):
+        raise HTTPException(422, "url must start with https://")
+    max_chars = min(max(int(body.max_chars), 500), 15000)
+    result = firecrawl_client.scrape_url(body.url, max_chars=max_chars)
+    if not result.get("success"):
+        raise HTTPException(502, result.get("error", "scrape failed"))
+    return result
+
+
+@api.post("/firecrawl/search")
+@limiter.limit("10/minute")
+def firecrawl_search_route(body: FirecrawlSearchRequest, request: Request):
+    """Search the web via Firecrawl and return scraped markdown from top results."""
+    limit = min(max(int(body.limit), 1), 10)
+    results = firecrawl_client.search_web(body.query[:500], limit=limit, scrape_results=True)
+    errors = [r for r in results if not r.get("success")]
+    if errors and len(errors) == len(results):
+        raise HTTPException(502, errors[0].get("error", "search failed"))
+    return {"results": [r for r in results if r.get("success")], "count": len(results)}
+
+
+@api.post("/web/citations")
+@limiter.limit("20/minute")
+def web_citations_route(body: WebCitationRequest, request: Request):
+    """Google-style web citation search for Perplexity-like sourced answers."""
+    ticker = _ticker_symbol(body.ticker) if body.ticker else ""
+    limit = min(max(int(body.limit), 1), 10)
+    result = web_citations.search_citations(
+        body.query,
+        ticker=ticker,
+        limit=limit,
+        prefer_google=bool(body.prefer_google),
+    )
+    if result.get("error") and not result.get("results"):
+        raise HTTPException(502, result["error"])
+    return result
 
 
 def _clean_price_rows(df, fields: list[str], limit: int = 8) -> list[dict]:
@@ -1080,6 +1308,104 @@ def _select_chat_model(message: str, mode: str = "balanced") -> str:
     return fast_model if simple and not complex_ask else default_model
 
 
+CHAT_NON_TICKER_TERMS = {
+    # System / infra terms
+    "RAPHI", "SEC", "API", "MCP", "A2A", "GNN", "ML", "AI", "XBRL", "EDGAR",
+    "JSON", "CSV", "PDF", "URL", "LLM", "NYSE", "NASDAQ", "HTTP", "SSE",
+    # Finance / market abbreviations (must NOT be treated as tickers)
+    "EPS", "FCF", "P/E", "PE", "AUM", "NAV", "VIX", "SPX", "YTD", "TTM",
+    "RSI", "EV", "EBIT", "EBITDA", "GAAP", "OPEX", "CAPEX", "ROIC", "WACC",
+    "IPO", "ETF", "ESG", "HFT", "OEM", "PMI", "CPI", "GDP", "DCF",
+    "VAR", "VaR", "FOMC", "FED", "FX", "FY", "PCE",
+    # Tech / product terms frequently in AI/chip analysis
+    "CUDA", "GPU", "TAM", "FSD",
+    # Company peers often mentioned by full abbreviation (not tickers in context)
+    "TSMC", "OEM",
+    # SEC form names
+    "DEF", "HR", "FORM",
+    # Trade signals
+    "BUY", "SELL", "HOLD", "LONG", "SHORT",
+    # Common English words that regex would otherwise match as 2-5 char uppercase
+    "YES", "NO", "ME", "MY", "WE", "US", "IF", "OR", "IN", "IS", "IT", "AT",
+    "WHAT", "WHO", "HOW", "WHY", "WHEN", "WHERE", "WHICH", "WRITE", "GIVE",
+    "TELL", "KNOW", "ABOUT", "STOCK", "STOCKS", "MEMO", "RISK", "PRICE",
+    "BEST", "NEXT", "DAY", "CAN", "YOU", "ARE", "THE", "THIS", "THAT",
+    "WITH", "FROM", "FOR", "AND", "USING", "PERFORMANCE",
+    "PULL", "PULLS", "PULLED", "RECENT", "MOST", "FULL", "DEEP", "DIVE",
+    "DATA", "SHOW", "SHOWS", "LIKE", "WOULD", "COULD", "SHOULD",
+    "FIND", "LARGE", "CAP", "TYPE", "LAST", "PAST", "OVER", "SAME", "REAL",
+    "INTO", "JUST", "ALSO", "MORE", "LESS", "VERY", "HAVE", "BEEN", "THAN",
+    "EACH", "BOTH", "SUCH", "DOES", "WANT", "NEED", "WILL", "HELD", "PLAN",
+}
+
+
+def _extract_ticker_from_text(text: str) -> str | None:
+    for token in _re.findall(r"\b[A-Z]{2,5}\b", str(text or "").upper()):
+        if token not in CHAT_NON_TICKER_TERMS and TICKER_RE.match(token):
+            return token
+    return None
+
+
+def _resolve_chat_ticker(req: "ChatRequest") -> str:
+    explicit = _extract_ticker_from_text(req.message)
+    if explicit:
+        return explicit
+    user_history = [item for item in req.history[-10:] if item.get("role") == "user"]
+    for item in reversed(user_history):
+        found = _extract_ticker_from_text(item.get("content", ""))
+        if found:
+            return found
+    for item in reversed(req.history[-6:]):
+        if item.get("role") == "assistant":
+            continue
+        found = _extract_ticker_from_text(item.get("content", ""))
+        if found:
+            return found
+    return _ticker_symbol(req.ticker)
+
+
+def _is_identity_or_capability_query(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    return bool(_re.search(
+        r"\b(who are you|what are you|what can you do|what you can do|capabilit(?:y|ies)|how many stocks|total stocks|stock universe|coverage universe)\b",
+        text,
+    ))
+
+
+def _chat_identity_response(message: str) -> str:
+    text = str(message or "").lower()
+    watchlist = _watchlist()
+    if _re.search(r"\b(how many stocks|total stocks|stock universe|coverage universe|give me a number)\b", text):
+        try:
+            stats = sec.summary_stats()
+            companies = int(stats.get("total_companies", 0) or 0)
+            filings = int(stats.get("total_filings", 0) or 0)
+            quarters = int(stats.get("total_quarters", 0) or 0)
+        except Exception:
+            companies = filings = quarters = 0
+        return (
+            "## RAPHI Coverage\n\n"
+            f"- Local SEC company universe: **{companies:,} companies**\n"
+            f"- Local SEC filing rows: **{filings:,} filings** across **{quarters} quarters**\n"
+            f"- Default watchlist: **{len(watchlist)} tickers** ({', '.join(watchlist)})\n"
+            "- Live stock lookup: available on demand for valid US ticker symbols"
+        )
+
+    return (
+        "## RAPHI\n\n"
+        "I am RAPHI, a local-first AI investment intelligence system.\n\n"
+        "### What I Can Do\n"
+        "- Search local SEC filings and XBRL financials\n"
+        "- Cite SEC accession numbers, filing dates, and archive URLs\n"
+        "- Pull live or cached market data, fundamentals, and news\n"
+        "- Generate ML and GNN-backed signal context\n"
+        "- Analyze portfolio P&L, VaR, Sharpe, alpha, and alerts\n"
+        "- Produce exportable investment memos with provenance\n"
+        "- Remember prior research context when memory is enabled\n\n"
+        "Ask me for a ticker, SEC filing, model signal, portfolio risk view, or memo export."
+    )
+
+
 def _cached_system_blocks(stable_prompt: str, dynamic_prompt: str):
     if os.environ.get("RAPHI_PROMPT_CACHE", "1") == "0":
         return f"{stable_prompt}\n\n{dynamic_prompt}"
@@ -1106,6 +1432,67 @@ def _load_signal_payload(ticker: str) -> dict:
         return {"available": False, "error": str(exc)}
 
 
+def _agentic_plan(message: str, ticker: str) -> list[dict]:
+    text = str(message or "").lower()
+    steps = [
+        {"id": "understand", "label": f"Identify the user goal and primary ticker ({ticker})"},
+        {"id": "market", "label": "Load price performance, fundamentals, provider source, and news URLs"},
+    ]
+    if _re.search(r"\b(sec|filing|10-k|10-q|fundamental|financial|citation|source|evidence|memo|investable|analyze|analysis)\b", text):
+        steps.append({"id": "sec", "label": "Retrieve SEC filing metadata, XBRL metrics, accession numbers, and SEC links"})
+    if _re.search(r"\b(ml|model|signal|gnn|graph|peer|neighbor|risk|investable|recommend|analyze|analysis)\b", text):
+        steps.append({"id": "models", "label": "Check cached ML signal and GNN relationship layer"})
+    steps.extend([
+        {"id": "web", "label": "Fetch Google-style web citations for current narrative/source claims"},
+        {"id": "portfolio", "label": "Compute portfolio exposure, P&L, VaR, and Sharpe context"},
+        {"id": "memory", "label": "Retrieve episodic memory for prior ticker/thread context"},
+        {"id": "synthesis", "label": "Synthesize answer with evidence, uncertainty, and trade/risk framing"},
+        {"id": "reflection", "label": "Reflect on missing sources, hallucination risk, and guardrail repairs before finalizing"},
+    ])
+    return steps
+
+
+def _source_checks(text: str, local_context: dict | None = None) -> dict:
+    local_context = local_context or {}
+    sec_ctx = local_context.get("sec", {}) or {}
+    market_detail = (local_context.get("market", {}) or {}).get("detail", {}) or {}
+    news = (local_context.get("market", {}) or {}).get("news", []) or []
+    gnn_ctx = local_context.get("gnn", {}) or {}
+    signal = local_context.get("ml_signal", {}) or {}
+    body = str(text or "")
+    web_ctx = local_context.get("web_citations", {}) or {}
+    return {
+        "sec_citation_available": bool(sec_ctx.get("recent_filings") or sec_ctx.get("financial_citations")),
+        "sec_citation_used": bool(_re.search(r"https://www\.sec\.gov/Archives|accession\s+[0-9-]{10,}", body, _re.I)),
+        "market_source_available": bool(market_detail.get("quote_url") or market_detail.get("source")),
+        "market_source_used": "finance.yahoo.com/quote" in body or "Yahoo Finance" in body,
+        "news_source_available": any(item.get("url") and item.get("url") != "#" for item in news),
+        "news_source_used": bool(_re.search(r"https?://", body)) if news else True,
+        "web_citations_available": bool(web_ctx.get("results")),
+        "web_citations_used": any((item.get("url") or "") in body for item in web_ctx.get("results", [])[:5]),
+        "ml_checked": bool(signal),
+        "gnn_checked": bool(gnn_ctx.get("status") or gnn_ctx.get("signal")),
+        "risk_framing_used": bool(_re.search(r"\b(risk|uncertain|uncertainty|downside|stop|invalidation|may|could)\b", body, _re.I)),
+    }
+
+
+def _reflection_label(checks: dict) -> str:
+    missing = []
+    if checks.get("sec_citation_available") and not checks.get("sec_citation_used"):
+        missing.append("SEC citation link")
+    if checks.get("market_source_available") and not checks.get("market_source_used"):
+        missing.append("market source")
+    if checks.get("news_source_available") and not checks.get("news_source_used"):
+        missing.append("news source")
+    if checks.get("web_citations_available") and not checks.get("web_citations_used"):
+        missing.append("web citation link")
+    if not checks.get("risk_framing_used"):
+        missing.append("risk framing")
+    if missing:
+        return "Reflection found gaps: " + ", ".join(missing)
+    return "Reflection passed: sources, memory, tools, and risk framing checked"
+
+
 def _collect_local_agent_context(
     *,
     message: str,
@@ -1113,6 +1500,7 @@ def _collect_local_agent_context(
     snap: dict,
     detail: dict,
     news: list,
+    registration: dict | None = None,
 ) -> dict:
     """Collect real specialist-agent evidence for the browser fallback path."""
     lower = message.lower()
@@ -1122,15 +1510,17 @@ def _collect_local_agent_context(
         _re.I,
     ))
     want_gnn = bool(_re.search(
-        r"\b(gnn|graph|peer|neighbor|signal|memo|thesis|recommend|risk|explain)\b",
+        r"\b(gnn|graph|peer|neighbor|signal|memo|thesis|recommend|risk|explain|investable|investment|analyze|analysis|performance)\b",
         lower,
         _re.I,
     ))
 
     ctx: dict = {
         "ticker": ticker,
+        "identity": _ticker_identity(ticker),
+        "gnn_registration": registration or {},
         "market": {
-            "detail": detail,
+            "detail": _apply_ticker_identity(ticker, detail),
             "news": news[:5],
         },
         "portfolio": snap,
@@ -1139,11 +1529,13 @@ def _collect_local_agent_context(
             "recent_filings": [],
             "financials": {},
             "financial_entries": [],
+            "financial_citations": {},
         },
         "gnn": {
             "status": {},
             "signal": {},
         },
+        "web_citations": {"provider": "none", "results": [], "count": 0},
     }
 
     try:
@@ -1160,6 +1552,10 @@ def _collect_local_agent_context(
             ctx["sec"]["financial_entries"] = sec.company_financial_entries(ticker, limit_filings=4)[:16]
         except Exception as exc:
             ctx["sec"]["financial_entries_error"] = str(exc)
+        try:
+            ctx["sec"]["financial_citations"] = sec.company_financial_citations(ticker)
+        except Exception as exc:
+            ctx["sec"]["financial_citations_error"] = str(exc)
 
     try:
         ctx["gnn"]["status"] = gnn.status()
@@ -1171,6 +1567,56 @@ def _collect_local_agent_context(
             ctx["gnn"]["signal"] = gnn.predict(ticker, _gnn_universe(ticker))
         except Exception as exc:
             ctx["gnn"]["signal"] = {"error": str(exc), "ticker": ticker}
+
+    # ── Live SEC EDGAR (real-time filings, 8-K events, insider Form 4s) ──────
+    want_live_sec = bool(_re.search(
+        r"\b(recent|latest|last\s+\d+\s+days?|this\s+(week|month|quarter)|just\s+filed"
+        r"|8-?k|form\s*4|insider|ownership|material\s+event|risk\s+factor"
+        r"|10-?[kq]|annual|quarterly|filing|changed|updated)\b",
+        lower, _re.I,
+    ))
+    ctx["edgar_live"] = {"available": False, "filings": [], "events_8k": [], "insider_form4": []}
+    try:
+        live_summary = edgar_live.get_ticker_live_summary(ticker, days=60)
+        ctx["edgar_live"] = {
+            "available":        True,
+            "cik":              live_summary.get("cik", ""),
+            "filings":          live_summary.get("filings", []),
+            "events_8k":        live_summary.get("material_events", []),
+            "insider_form4":    live_summary.get("insider_transactions", []),
+            "retrieved_at":     live_summary.get("retrieved_at", ""),
+        }
+    except Exception as exc:
+        ctx["edgar_live"]["error"] = str(exc)
+
+    # ── Firecrawl web narrative (earnings transcript, analyst coverage) ───────
+    want_narrative = bool(_re.search(
+        r"\b(transcript|earnings\s+call|analyst|price\s+target|coverage|recommend"
+        r"|upgrade|downgrade|initiat|explain|narrative|outlook|guidance)\b",
+        lower, _re.I,
+    ))
+    ctx["firecrawl"] = {"available": firecrawl_client.is_available()}
+    if want_narrative and firecrawl_client.is_available():
+        try:
+            ctx["firecrawl"]["transcript"] = firecrawl_client.get_earnings_transcript(ticker)
+        except Exception as exc:
+            ctx["firecrawl"]["transcript_error"] = str(exc)
+        try:
+            ctx["firecrawl"]["analyst"] = firecrawl_client.get_analyst_coverage(ticker)
+        except Exception as exc:
+            ctx["firecrawl"]["analyst_error"] = str(exc)
+
+    want_web_citations = bool(_re.search(
+        r"\b(source|sources|citation|citations|cite|google|perplexity|web|news|latest|recent|analyst|transcript|article|why|how|evidence)\b",
+        lower,
+        _re.I,
+    ))
+    if want_web_citations:
+        query = f"{ticker} {message} investment analysis source"
+        try:
+            ctx["web_citations"] = web_citations.search_citations(query, ticker=ticker, limit=5)
+        except Exception as exc:
+            ctx["web_citations"] = {"provider": "web_citations", "results": [], "count": 0, "error": str(exc)}
 
     return ctx
 
@@ -1189,6 +1635,9 @@ def _fmt_large_number(value) -> str:
 
 
 def _format_local_agent_context(ctx: dict) -> str:
+    ticker = ctx.get("ticker", "")
+    identity = ctx.get("identity", {}) or {}
+    registration = ctx.get("gnn_registration", {}) or {}
     detail = ctx.get("market", {}).get("detail", {}) or {}
     news = ctx.get("market", {}).get("news", []) or []
     sec_ctx = ctx.get("sec", {}) or {}
@@ -1199,21 +1648,51 @@ def _format_local_agent_context(ctx: dict) -> str:
     lines = [
         "Local specialist-agent evidence:",
         "",
+        "@company-identity",
+        f"- Current identity: {identity.get('current_name') or detail.get('name') or ticker}",
+    ]
+    if identity.get("former_name"):
+        lines.append(f"- Former / legacy identity: {identity.get('former_name')}")
+    if identity.get("identity_note"):
+        lines.append(f"- Identity note: {identity.get('identity_note')}")
+    if identity.get("strategy_note"):
+        lines.append(f"- Strategy note: {identity.get('strategy_note')}")
+    if detail.get("provider_name"):
+        lines.append(f"- Provider returned legacy name: {detail.get('provider_name')}")
+    lines.extend([
+        "",
+        "@gnn-registration",
+        f"- Added to tracked universe this request: {registration.get('added_to_watchlist', False)}",
+        f"- GNN universe includes: {', '.join(registration.get('universe', [])[:18]) or 'unavailable'}",
+    ])
+    if registration.get("gnn_error"):
+        lines.append(f"- GNN training/register note: {registration.get('gnn_error')}")
+    elif registration:
+        reg_status = registration.get("gnn_status") or {}
+        lines.append(
+            f"- Registered in trained graph: {registration.get('gnn_added', False)} "
+            f"({reg_status.get('graph_nodes', 'n/a')} nodes / {reg_status.get('graph_edges', 'n/a')} edges)"
+        )
+    lines.extend([
+        "",
         "@market-analyst",
         f"- Price: ${detail.get('price', 'unavailable')} ({detail.get('pct', 'unavailable')}%)",
+        f"- Market data source: {detail.get('source', 'Yahoo Finance via yfinance')} | quote URL {detail.get('quote_url', f'https://finance.yahoo.com/quote/{ticker}')}",
         f"- Valuation: P/E {detail.get('pe_ratio', 'unavailable')} | forward P/E {detail.get('forward_pe', 'unavailable')}",
         f"- Scale: market cap {_fmt_large_number(detail.get('market_cap'))} | revenue {_fmt_large_number(detail.get('revenue'))}",
         f"- Business: {(detail.get('short_summary') or 'unavailable')[:320]}",
         "",
         "@sec-researcher",
-    ]
+    ])
 
     filings = sec_ctx.get("recent_filings") or []
     if filings:
         for filing in filings[:5]:
             lines.append(
                 f"- {filing.get('form', '?')} filed {filing.get('filed', '?')} "
-                f"for period {filing.get('period', '?')} ({filing.get('quarter', '?')})"
+                f"for period {filing.get('period', '?')} ({filing.get('quarter', '?')}); "
+                f"accession {filing.get('accession', 'unavailable')}; "
+                f"SEC URL {filing.get('sec_url', 'unavailable')}"
             )
     else:
         lines.append("- No local SEC filing metadata found for this ticker.")
@@ -1225,6 +1704,16 @@ def _format_local_agent_context(ctx: dict) -> str:
             for metric, value in list(financials.items())[:8]
         ]
         lines.append(f"- Latest XBRL metrics: {'; '.join(compact)}")
+    citations = sec_ctx.get("financial_citations") or {}
+    if citations:
+        lines.append("- XBRL metric citations:")
+        for metric, citation in list(citations.items())[:8]:
+            lines.append(
+                f"  - {metric}: {citation.get('form', '?')} "
+                f"{citation.get('accession', 'unavailable')} filed {citation.get('filed', '?')}; "
+                f"tag {citation.get('tag', 'n/a')}; value {_fmt_large_number(citation.get('value'))} "
+                f"{citation.get('unit', '')}; SEC URL {citation.get('sec_url', 'unavailable')}"
+            )
     if sec_ctx.get("financials_error") or sec_ctx.get("financial_entries_error"):
         lines.append(
             f"- SEC XBRL detail note: {sec_ctx.get('financials_error') or sec_ctx.get('financial_entries_error')}"
@@ -1284,10 +1773,81 @@ def _format_local_agent_context(ctx: dict) -> str:
         for item in news[:4]:
             lines.append(
                 f"- {item.get('title', 'Untitled')} "
-                f"({item.get('sentiment', 'neutral')}, score {item.get('score', 'n/a')})"
+                f"({item.get('sentiment', 'neutral')}, score {item.get('score', 'n/a')}); "
+                f"publisher {item.get('publisher', 'unknown')}; "
+                f"source URL {item.get('url', 'unavailable')}"
             )
     else:
         lines.append("- No live news returned by the market data provider.")
+
+    # ── Live SEC EDGAR (real-time) ────────────────────────────────────────────
+    edgar_ctx = ctx.get("edgar_live") or {}
+    lines.extend(["", "@edgar-live-filings"])
+    if not edgar_ctx.get("available"):
+        err = edgar_ctx.get("error", "CIK resolution failed or unavailable")
+        lines.append(f"- EDGAR live data unavailable: {err}")
+    else:
+        lines.append(f"- CIK: {edgar_ctx.get('cik', 'unknown')} | retrieved: {edgar_ctx.get('retrieved_at', 'n/a')}")
+        live_filings = edgar_ctx.get("filings") or []
+        if live_filings:
+            lines.append("- Recent 10-K/10-Q (live from EDGAR):")
+            for f in live_filings[:4]:
+                lines.append(
+                    f"  - {f.get('form')} filed {f.get('filed')} | accession {f.get('accession')} | "
+                    f"documents: {f.get('documents_url', 'unavailable')}"
+                )
+        else:
+            lines.append("- No recent 10-K/10-Q found in last 60 days.")
+        events = edgar_ctx.get("events_8k") or []
+        if events:
+            lines.append("- Material events (8-K, live):")
+            for e in events[:4]:
+                lines.append(
+                    f"  - 8-K filed {e.get('filed')} | accession {e.get('accession')} | "
+                    f"documents: {e.get('documents_url', 'unavailable')}"
+                )
+        else:
+            lines.append("- No 8-K material events in last 60 days.")
+        insiders = edgar_ctx.get("insider_form4") or []
+        if insiders:
+            lines.append("- Insider Form 4 transactions (live):")
+            for i in insiders[:6]:
+                lines.append(
+                    f"  - Form 4 filed {i.get('filed')} | accession {i.get('accession')} | "
+                    f"documents: {i.get('documents_url', 'unavailable')}"
+                )
+        else:
+            lines.append("- No Form 4 insider transactions in last 60 days.")
+
+    # ── Firecrawl narrative (earnings transcript, analyst coverage) ───────────
+    fc_ctx = ctx.get("firecrawl") or {}
+    if fc_ctx.get("available"):
+        lines.extend(["", "@firecrawl-narrative"])
+        transcript = fc_ctx.get("transcript") or {}
+        if transcript.get("success") and transcript.get("markdown"):
+            lines.append(f"- Earnings transcript source: {transcript.get('source', 'unavailable')}")
+            lines.append(f"- Transcript excerpt: {transcript['markdown'][:1200]}")
+        analyst = fc_ctx.get("analyst") or {}
+        if analyst.get("success") and analyst.get("markdown"):
+            lines.append(f"- Analyst coverage source: {analyst.get('source', 'unavailable')}")
+            lines.append(f"- Analyst excerpt: {analyst['markdown'][:1000]}")
+
+    web_ctx = ctx.get("web_citations") or {}
+    lines.extend(["", "@web-citation-search"])
+    if web_ctx.get("results"):
+        lines.append(
+            f"- Citation provider: {web_ctx.get('source_note') or web_ctx.get('provider')} | "
+            f"query: {web_ctx.get('query')}"
+        )
+        for item in web_ctx.get("results", [])[:5]:
+            lines.append(
+                f"  - [{item.get('id')}] {item.get('title', 'Untitled')} | "
+                f"{item.get('domain', item.get('display_link', ''))} | "
+                f"{item.get('url', 'unavailable')} | "
+                f"snippet: {item.get('snippet', '')[:260]}"
+            )
+    else:
+        lines.append(f"- Web citation search unavailable: {web_ctx.get('error', 'not requested or no results')}")
 
     return "\n".join(lines)
 
@@ -1306,6 +1866,10 @@ async def _stream_direct_anthropic_chat(
 
 Guardrails:
 - Never fabricate numbers; cite tool/data context or say unavailable.
+- Every SEC claim must include accession number, filing date, and SEC URL when available.
+- Every news claim must include publisher/source URL when available.
+- Every market quote or fundamental should name its provider/source URL when available.
+- For web/current-events claims, cite numbered web citation results with title and URL, like [1].
 - Investment views must include risk, uncertainty, sizing, and invalidation framing.
 - Do not present investment outcomes as guaranteed.
 - Use clean Markdown with concise bullets and readable sections."""
@@ -1368,7 +1932,6 @@ class ChatRequest(BaseModel):
 async def chat(req: ChatRequest, request: Request):
     import json, asyncio
 
-    api_key_anthropic = _anthropic_api_key()
     try:
         req.message = sanitize_user_input(req.message)
     except ValueError as exc:
@@ -1379,10 +1942,22 @@ async def chat(req: ChatRequest, request: Request):
         return StreamingResponse(rejected(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    if _is_identity_or_capability_query(req.message):
+        async def identity_response():
+            yield _sse("step", json.dumps({"id": "direct", "label": "Answered from RAPHI capability registry"}))
+            yield _sse("token", _chat_identity_response(req.message))
+            yield _sse("done", "")
+        return StreamingResponse(identity_response(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    api_key_anthropic = _anthropic_api_key()
     snap   = portfolio.snapshot()
-    ticker = _ticker_symbol(req.ticker)
-    detail = market.stock_detail(ticker)
+    ticker = _resolve_chat_ticker(req)
+    registration = await asyncio.to_thread(_register_ticker_for_agentic_analysis, ticker)
+    detail = _apply_ticker_identity(ticker, market.stock_detail(ticker))
     news   = market.stock_news(ticker, limit=3)
+    identity = _ticker_identity(ticker)
+    gnn_status = registration.get("gnn_status") or {}
 
     sig_text = ""
     sig_cache = BASE / ".model_cache" / f"{ticker}.pkl"
@@ -1396,11 +1971,19 @@ async def chat(req: ChatRequest, request: Request):
             pass
 
     permanent_memory = _memory_context(f"{req.message} {ticker}", limit=6)
+    execution_plan = _agentic_plan(req.message, ticker)
     system = f"""You are RAPHI, an AI investment intelligence platform.
+Agentic execution plan:
+{chr(10).join(f"- {step['label']}" for step in execution_plan)}
 Portfolio: {_fmt_portfolio(snap)}
+Company identity ({ticker}): {identity.get('current_name', ticker)}
+Former identity: {identity.get('former_name', 'none')}
+Identity note: {identity.get('identity_note', 'No special identity override.')}
 Stock ({ticker}): ${detail.get('price','?')} P/E {detail.get('pe_ratio','?')}
 Signal: {sig_text or 'not computed'}
+GNN registration: added_to_watchlist={registration.get('added_to_watchlist')} registered_in_graph={registration.get('gnn_added')} nodes={gnn_status.get('graph_nodes','?')} edges={gnn_status.get('graph_edges','?')}
 News: {chr(10).join(f"- {n['title']}" for n in news[:3])}
+News sources: {chr(10).join(f"- {n.get('publisher','unknown')}: {n.get('url','unavailable')}" for n in news[:3])}
 Permanent graph memory:
 {permanent_memory or 'No relevant permanent memory found.'}
 Use institutional language and quote specific numbers.
@@ -1408,6 +1991,9 @@ Use institutional language and quote specific numbers.
 Presentation rules for the RAPHI web console:
 - Write in clean Markdown with short headings and concise bullets.
 - For investment memos, use exactly these sections: Recommendation, Key Evidence, GNN / Peer Influence, Risks, Trade Plan.
+- In Key Evidence, include a Sources / Citations subsection with direct links.
+- For non-SEC narrative claims, use the @web-citation-search results and cite them as [1], [2], etc.
+- Do not say "SEC checked" unless you include at least one SEC accession/date/URL or explicitly say unavailable.
 - Put the recommendation, confidence, and target/stop in the first 2 lines.
 - Do not use ASCII diagrams, pipe-delimited relationship chains, raw graph art, or dense one-paragraph blocks.
 - Keep each bullet under 24 words and use tables only for compact comparisons."""
@@ -1420,6 +2006,7 @@ Presentation rules for the RAPHI web console:
         source_summary=(
             f"market data, news, portfolio, SEC filings/XBRL, ML cache, "
             f"GNN graph influence, permanent memory, A2A/MCP tools for {ticker}"
+            + (f"; known as {identity['current_name']}" if identity.get("current_name") else "")
         ),
         require_memo_schema=_requires_memo_schema(req.message),
     )
@@ -1457,18 +2044,38 @@ Presentation rules for the RAPHI web console:
         collected: list[str] = []
         used_agentic = False
         agentic_error = ""
+        local_context: dict | None = None
+
+        yield _sse("step", json.dumps({
+            "id": "plan",
+            "label": "Reasoning plan prepared: goal -> tools -> memory -> synthesis -> reflection",
+            "plan": execution_plan,
+        }))
+        for step in execution_plan:
+            await asyncio.sleep(0.01)
+            yield _sse("step", json.dumps({
+                "id": f"plan_{step['id']}",
+                "label": f"Plan: {step['label']}",
+            }))
 
         if req.agentic:
             yield _sse("step", json.dumps({"id": "orchestrator", "label": "Routing browser chat through A2A agent swarm"}))
             agent_prompt = (
                 f"User request: {req.message}\n\n"
                 f"Primary ticker: {ticker}\n"
+                f"Company identity: {identity.get('current_name', ticker)}\n"
+                f"Former identity: {identity.get('former_name', 'none')}\n"
+                f"Identity note: {identity.get('identity_note', 'No special identity override.')}\n"
                 f"Current portfolio context:\n{_fmt_portfolio(snap)}\n"
                 f"Current stock context: price ${detail.get('price','?')}, P/E {detail.get('pe_ratio','?')}\n"
+                f"Market source: {detail.get('source', 'Yahoo Finance via yfinance')} | {detail.get('quote_url', f'https://finance.yahoo.com/quote/{ticker}')}\n"
                 f"Current signal context: {sig_text or 'not computed'}\n"
-                f"Recent news headlines:\n{chr(10).join(f'- {n['title']}' for n in news[:3])}\n"
+                f"GNN registration status: added_to_watchlist={registration.get('added_to_watchlist')}; "
+                f"registered_in_graph={registration.get('gnn_added')}; "
+                f"graph={gnn_status.get('graph_nodes','?')} nodes/{gnn_status.get('graph_edges','?')} edges\n"
+                f"Recent news headlines and URLs:\n{chr(10).join(f'- {n['title']} | {n.get('publisher','unknown')} | {n.get('url','unavailable')}' for n in news[:3])}\n"
                 f"Use MCP tools when more precise market, SEC, ML/GNN, portfolio, or memory data is needed. "
-                f"Reply in clean Markdown with concise bullets and explicit risk framing."
+                f"Reply in clean Markdown with concise bullets, exact citation links, and explicit risk framing."
             )
             async for event in _agent.stream(agent_prompt, task_id=f"web:{req.thread_id}:{ticker}"):
                 if event["event"] == "error":
@@ -1495,12 +2102,14 @@ Presentation rules for the RAPHI web console:
                 snap=snap,
                 detail=detail,
                 news=news,
+                registration=registration,
             )
             local_steps = [
                 ("market",       f"@market-analyst loaded live price, fundamentals, and news for {ticker}"),
                 ("sec",          "@sec-researcher loaded local SEC filing history and XBRL when requested"),
                 ("signals",      "@ml-signals checked cached XGBoost/LSTM signal output"),
                 ("gnn",          "@gnn-influence checked graph status and neighbor influence"),
+                ("web",          "@web-citation-search fetched Google-style web citation results when requested"),
                 ("portfolio",    "@portfolio-risk computed exposure, P&L, VaR, and Sharpe"),
                 ("synthesize",   "@memo-synthesizer combining specialist outputs with guardrails"),
             ]
@@ -1517,8 +2126,25 @@ Presentation rules for the RAPHI web console:
             ):
                 if chunk.startswith("event: token"):
                     data = chunk.split("data: ", 1)[1].rstrip("\n")
+                    try:
+                        data = json.loads(data)
+                    except Exception:
+                        pass
                     collected.append(data)
                 yield chunk
+
+        checks = _source_checks("".join(collected), local_context)
+        yield _sse("step", json.dumps({
+            "id": "reflection",
+            "label": _reflection_label(checks),
+            "checks": checks,
+        }))
+        if _reflection_label(checks).startswith("Reflection found gaps"):
+            yield _sse("token", (
+                "\n\n### Reflection Check\n"
+                "- Some requested evidence was not fully cited in the generated text above.\n"
+                "- Use the Sources / Citations section or rerun with a narrower filing/news request for stricter provenance."
+            ))
 
         _maybe_write_conviction(
             ticker=ticker,
@@ -1646,6 +2272,126 @@ Permanent graph memory:
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _build_memo_export(ticker: str) -> dict:
+    detail = market.stock_detail(ticker)
+    news = market.stock_news(ticker, limit=5)
+    snap = portfolio.snapshot()
+    filings = sec.ticker_filings(ticker, limit=8)
+    financials = sec.company_financials(ticker)
+    financial_citations = sec.company_financial_citations(ticker)
+    signal = _load_signal_payload(ticker)
+    gnn_signal = {}
+    try:
+        gnn_signal = gnn.predict(ticker, _gnn_universe(ticker))
+    except Exception as exc:
+        gnn_signal = {"error": str(exc), "ticker": ticker}
+
+    recommendation = signal.get("direction") if signal.get("available") else gnn_signal.get("direction", "HOLD")
+    confidence = signal.get("confidence") if signal.get("available") else gnn_signal.get("confidence")
+    return {
+        "ticker": ticker,
+        "exported_at": pd.Timestamp.now("UTC").isoformat(),
+        "recommendation": recommendation or "HOLD",
+        "confidence": confidence,
+        "market": {
+            "price": detail.get("price"),
+            "change_pct": detail.get("pct"),
+            "pe_ratio": detail.get("pe_ratio"),
+            "market_cap": detail.get("market_cap"),
+            "sector": detail.get("sector"),
+            "industry": detail.get("industry"),
+        },
+        "sec": {
+            "cik": sec.cik_for_ticker(ticker),
+            "filings": filings,
+            "financials": financials,
+            "financial_citations": financial_citations,
+        },
+        "ml_signal": signal,
+        "gnn": gnn_signal,
+        "portfolio": snap,
+        "news": news,
+        "provenance": {
+            "market": "yfinance live/cache wrapper",
+            "sec": "SEC Financial Statement Data Sets and SEC EDGAR Archives",
+            "ml": ".model_cache signal artifacts",
+            "gnn": ".model_cache/gnn_state.pkl when trained",
+            "portfolio": "portfolio.json plus live/cache prices",
+        },
+    }
+
+
+def _memo_export_markdown(payload: dict) -> str:
+    ticker = payload["ticker"]
+    market_payload = payload.get("market", {})
+    sec_payload = payload.get("sec", {})
+    gnn_payload = payload.get("gnn", {})
+    portfolio_payload = payload.get("portfolio", {})
+    citations = sec_payload.get("financial_citations", {})
+    citation_lines = []
+    for metric, citation in list(citations.items())[:8]:
+        citation_lines.append(
+            f"- {metric}: {citation.get('form')} {citation.get('accession')} "
+            f"filed {citation.get('filed')} ({citation.get('sec_url')})"
+        )
+    if not citation_lines:
+        citation_lines.append("- No metric-level SEC citations available for this ticker.")
+
+    filings = sec_payload.get("filings", [])
+    filing_lines = [
+        f"- {f.get('form')} {f.get('accession')} filed {f.get('filed')} ({f.get('sec_url')})"
+        for f in filings[:5]
+    ] or ["- No recent SEC filings found in the local dataset."]
+
+    return "\n".join([
+        f"# RAPHI Memo Export: {ticker}",
+        "",
+        f"Exported: {payload.get('exported_at')}",
+        f"Recommendation: {payload.get('recommendation')} ({payload.get('confidence', 'n/a')} confidence)",
+        "",
+        "## Market",
+        f"- Price: ${market_payload.get('price', 'n/a')}",
+        f"- P/E: {market_payload.get('pe_ratio', 'n/a')}",
+        f"- Sector / Industry: {market_payload.get('sector', 'n/a')} / {market_payload.get('industry', 'n/a')}",
+        "",
+        "## SEC Evidence",
+        *filing_lines,
+        "",
+        "## Financial Citations",
+        *citation_lines,
+        "",
+        "## GNN / Peer Influence",
+        f"- Direction: {gnn_payload.get('direction', 'unavailable')}",
+        f"- Confidence: {gnn_payload.get('confidence', 'unavailable')}",
+        f"- Graph: {gnn_payload.get('graph_nodes', 'n/a')} nodes / {gnn_payload.get('graph_edges', 'n/a')} edges",
+        "",
+        "## Portfolio Risk",
+        f"- Portfolio value: ${portfolio_payload.get('total_value', 0):,.0f}",
+        f"- VaR 95%: ${portfolio_payload.get('var_95', 0):,.0f}",
+        f"- Sharpe: {portfolio_payload.get('sharpe', 0):.2f}",
+        "",
+        "## Provenance",
+        *(f"- {key}: {value}" for key, value in payload.get("provenance", {}).items()),
+        "",
+    ])
+
+
+@api.get("/memo/{ticker}/export")
+@limiter.limit("30/minute")
+def export_memo(ticker: str, request: Request, format: str = "markdown"):
+    ticker = _ticker_symbol(ticker)
+    payload = _build_memo_export(ticker)
+    if format.lower() in {"json", "data"}:
+        return payload
+    markdown = _memo_export_markdown(payload)
+    filename = f"raphi-memo-{ticker.lower()}-{pd.Timestamp.now('UTC').strftime('%Y-%m-%d')}.md"
+    return Response(
+        content=markdown,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── settings ──────────────────────────────────────────────────────────

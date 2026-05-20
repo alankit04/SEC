@@ -31,7 +31,12 @@ class FakeMarket:
         return {"price": 100.0, "change": 1.0, "pct": 1.0}
 
     def stock_detail(self, ticker):
-        return {"ticker": ticker, "price": 100.0}
+        return {
+            "ticker": ticker,
+            "price": 100.0,
+            "source": "Yahoo Finance via yfinance",
+            "quote_url": f"https://finance.yahoo.com/quote/{ticker}",
+        }
 
 
 class FakePortfolio:
@@ -87,3 +92,45 @@ def test_portfolio_position_upsert_filters_invalid_saved_rows(monkeypatch):
     assert fake_portfolio.positions == [
         {"ticker": "NVDA", "shares": 2.0, "entry_price": 100.0, "direction": "LONG"}
     ]
+
+
+def test_memo_export_markdown_contains_sec_citations(monkeypatch):
+    monkeypatch.setattr(
+        raphi_server,
+        "_build_memo_export",
+        lambda ticker: {
+            "ticker": ticker,
+            "exported_at": "2026-05-19T00:00:00Z",
+            "recommendation": "HOLD",
+            "confidence": 55,
+            "market": {"price": 100.0, "pe_ratio": 20, "sector": "Technology", "industry": "Semiconductors"},
+            "sec": {
+                "filings": [{
+                    "form": "10-Q",
+                    "accession": "0001045810-25-000230",
+                    "filed": "2025-11-19",
+                    "sec_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000230/",
+                }],
+                "financial_citations": {
+                    "revenue": {
+                        "form": "10-Q",
+                        "accession": "0001045810-25-000230",
+                        "filed": "2025-11-19",
+                        "sec_url": "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000230/",
+                    }
+                },
+            },
+            "gnn": {"direction": "HOLD", "confidence": 54.8, "graph_nodes": 7, "graph_edges": 3},
+            "portfolio": {"total_value": 0, "var_95": 0, "sharpe": 0},
+            "provenance": {"sec": "SEC Financial Statement Data Sets and SEC EDGAR Archives"},
+        },
+    )
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/memo/NVDA/export")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert "RAPHI Memo Export: NVDA" in response.text
+    assert "0001045810-25-000230" in response.text
+    assert "https://www.sec.gov/Archives/edgar/data/1045810/000104581025000230/" in response.text

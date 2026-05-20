@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
-from sec_data import QUARTERS, SECData
+from sec_data import QUARTERS, SECData, filing_citation, sec_accession_url
 
 
 def test_sec_data_uses_data_directory_and_all_quarters():
@@ -44,3 +44,20 @@ def test_sec_industry_summary_reports_local_universe_buckets():
 
     assert summary["total_industries"] > 0
     assert any(row["industry"] == "Electronic Equipment" for row in summary["industries"])
+
+
+def test_sec_filing_citations_include_archives_url_and_normalized_dates():
+    citation = filing_citation(
+        cik="1045810",
+        adsh="0001045810-25-000230",
+        form="10-Q",
+        filed="20251119",
+        period="20251031.0",
+        quarter="2025q4",
+    )
+
+    assert citation["source"] == "SEC Financial Statement Data Sets"
+    assert citation["filed"] == "2025-11-19"
+    assert citation["period"] == "2025-10-31"
+    assert citation["sec_url"] == sec_accession_url("1045810", "0001045810-25-000230")
+    assert citation["sec_url"].endswith("/1045810/000104581025000230/")

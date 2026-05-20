@@ -85,6 +85,13 @@ class TokenAuth:
             await self.app(scope, receive, send)
             return
 
+        # Local UI mode: allow same-machine API calls without requiring X-API-Key.
+        # This preserves email-only login for localhost while remote clients remain protected.
+        client_host = request.client.host if request.client else ""
+        if path.startswith("/api/") and client_host in {"127.0.0.1", "::1", "localhost"}:
+            await self.app(scope, receive, send)
+            return
+
         # H1/M3: MCP bridge uses X-Internal-Token — validate before external key check
         internal = request.headers.get("X-Internal-Token", "").strip()
         if internal:
