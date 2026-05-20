@@ -32,44 +32,57 @@ RAPHI is not a trading bot. It is an explainable investment analysis and decisio
 
 ## System Architecture
 
-RAPHI runs through a primary FastAPI application exposed by `backend/raphi_server.py`.
+RAPHI is organized as a local-first agentic financial intelligence system. The architecture separates the browser interface, FastAPI runtime, agent/tool execution layer, financial intelligence modules, memory, guardrails, and local persistence.
 
-```text
-Browser UI
-  |
-  |  /api/chat, /api/memo, /api/stock, /api/portfolio
-  v
-Primary RAPHI Server
-backend/raphi_server.py
-  |
-  |-- Market Data Layer
-  |     backend/market_data.py
-  |
-  |-- SEC Filing Layer
-  |     backend/sec_data.py
-  |
-  |-- ML Signal Layer
-  |     backend/ml_model.py
-  |
-  |-- GNN Signal Layer
-  |     backend/gnn_model.py
-  |
-  |-- Portfolio Risk Layer
-  |     backend/portfolio_manager.py
-  |
-  |-- Conviction Ledger
-  |     backend/conviction_store.py
-  |
-  |-- Memory Layer
-  |     backend/graph_memory.py
-  |
-  |-- Guardrails
-  |     backend/security.py
-  |     backend/llm_guardrails.py
-  |
-  |-- Agent Execution
-        backend/a2a_executor_v2.py
-        backend/raphi_mcp_server.py
+```mermaid
+flowchart TD
+    U[Financial Analyst / Investor / Research User]
+
+    UI[RAPHI Browser Dashboard<br/>Ask RAPHI Console<br/>Ticker Analysis<br/>SEC Filing Search<br/>Portfolio Risk<br/>Decision Memo<br/>Model Monitoring<br/>Alerts]
+
+    API[RAPHI FastAPI Runtime<br/>backend/raphi_server.py<br/><br/>/api/chat<br/>/api/memo<br/>/api/stock<br/>/api/portfolio<br/>/api/signals<br/>/api/sec<br/>/api/memory]
+
+    AGENT[Agent & Tool Execution Layer<br/>A2A Executor<br/>MCP Tool Bridge<br/>Tool Allowlisting<br/>Session Encryption<br/>Prompt Sanitization<br/>Fallback Evidence Pass]
+
+    MARKET[Market Data Layer<br/>backend/market_data.py<br/>Prices, news, ticker summaries]
+
+    SEC[SEC Filing Layer<br/>backend/sec_data.py<br/>SEC EDGAR, XBRL, filing search]
+
+    ML[ML Signal Engine<br/>backend/ml_model.py<br/>XGBoost, Gradient Boosting, SHAP-style explanations]
+
+    GNN[GNN Signal Engine<br/>backend/gnn_model.py<br/>GraphSAGE-style signals, cached graph state]
+
+    PORT[Portfolio Risk Layer<br/>backend/portfolio_manager.py<br/>VaR, Sharpe ratio, position risk, alerts]
+
+    LEDGER[Conviction Ledger<br/>backend/conviction_store.py<br/>Thesis history, reasoning records]
+
+    MEMORY[Graph Memory<br/>backend/graph_memory.py<br/>Neo4j primary memory<br/>Local JSON fallback]
+
+    GUARD[Guardrails & Safety<br/>backend/security.py<br/>backend/llm_guardrails.py<br/>Input sanitization, rate limits, tool allowlist,<br/>risk framing, overconfidence control]
+
+    CACHE[Local Persistence & Cache<br/>.model_cache/<br/>portfolio.json<br/>settings.json<br/>JSON / JSONL state files]
+
+    U --> UI
+    UI --> API
+    API --> AGENT
+
+    AGENT --> MARKET
+    AGENT --> SEC
+    AGENT --> ML
+    AGENT --> GNN
+    AGENT --> PORT
+    AGENT --> LEDGER
+    AGENT --> MEMORY
+    AGENT --> GUARD
+
+    MARKET --> CACHE
+    SEC --> CACHE
+    ML --> CACHE
+    GNN --> CACHE
+    PORT --> CACHE
+    LEDGER --> CACHE
+    MEMORY --> CACHE
+    GUARD --> API
 ```
 
 ---
