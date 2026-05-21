@@ -256,7 +256,7 @@ class RaphiAgent:
             allowed_tools=ALLOWED_TOOLS,
             permission_mode="acceptEdits",    # C3: was bypassPermissions
             can_use_tool=_tool_guard,          # C3: hard deny for unlisted tools
-            max_turns=15,
+            max_turns=5,
             cwd=str(BASE_DIR),
             cli_path=str(CLAUDE_CLI),
             setting_sources=["project"],
