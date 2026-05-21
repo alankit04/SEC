@@ -4,38 +4,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
 import web_citations
+from citation_index import CitationDocument, CitationIndex
 
 
-def test_firecrawl_search_results_are_normalized(monkeypatch):
+def test_web_citations_searches_local_index_first(tmp_path, monkeypatch):
+    idx = CitationIndex(database_url="", sqlite_path=tmp_path / "citations.sqlite")
+    idx.add_document(CitationDocument(
+        ticker="ASST",
+        source_type="news",
+        title="ASST result",
+        url="https://example.com/asst",
+        text="ASST Strive news source snippet about the company.",
+    ))
     monkeypatch.setattr(web_citations, "_cache", {})
-    monkeypatch.setattr(web_citations.firecrawl_client, "is_available", lambda: True)
 
-    def fake_search(query, limit=5, scrape_results=True, max_chars_per_result=1600):
-        assert query == "ASST Strive news"
-        return [{
-            "success": True,
-            "title": "ASST result",
-            "url": "https://example.com/asst",
-            "description": "ASST source snippet",
-            "markdown": "# ASST source snippet",
-        }]
+    result = web_citations.search_citations("Strive news", ticker="ASST", limit=1, index=idx)
 
-    monkeypatch.setattr(web_citations.firecrawl_client, "search_web", fake_search)
-
-    result = web_citations.search_citations("Strive news", ticker="ASST", limit=1)
-
-    assert result["provider"] == "firecrawl_search"
+    assert result["provider"] == "local_citation_index"
     assert result["count"] == 1
     assert result["results"][0]["url"] == "https://example.com/asst"
-    assert result["results"][0]["provider"] == "Firecrawl Search"
+    assert result["results"][0]["provider"] == "RAPHI Citation Index"
 
 
-def test_no_provider_returns_actionable_error(monkeypatch):
+def test_web_citations_reports_missing_local_results_without_refresh(tmp_path, monkeypatch):
+    idx = CitationIndex(database_url="", sqlite_path=tmp_path / "citations.sqlite")
     monkeypatch.setattr(web_citations, "_cache", {})
-    monkeypatch.setattr(web_citations.firecrawl_client, "is_available", lambda: False)
 
-    result = web_citations.search_citations("ASST news", ticker="ASST", limit=1)
+    result = web_citations.search_citations("ASST news", ticker="ASST", limit=1, index=idx)
 
-    assert result["provider"] == "none"
+    assert result["provider"] == "local_citation_index"
     assert result["count"] == 0
-    assert "FIRECRAWL_API_KEY" in result["error"]
+    assert "No local citation results found" in result["error"]

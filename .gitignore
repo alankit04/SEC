@@ -29,6 +29,8 @@ credentials.json
 .raphi_audit/
 # durable local graph-memory fallback
 .raphi_memory/
+# generated local ML/GNN/citation artifacts
+.model_cache/
 # audit trail files
 *.jsonl
 # project-local Docker volumes (Neo4j data/logs)

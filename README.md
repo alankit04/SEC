@@ -74,6 +74,8 @@ RAPHI is a local-first, agentic investment intelligence platform that combines l
 - yfinance
 - Local SEC EDGAR quarterly datasets in `data/`
 - XBRL parsing and filing search
+- Postgres-first citation index with local SQLite FTS5 fallback
+- Firecrawl refresh as an ingestion tool, not the default citation source
 
 ### Machine learning and graph modeling
 
@@ -91,6 +93,7 @@ RAPHI is a local-first, agentic investment intelligence platform that combines l
 
 - Neo4j HTTP-backed graph memory
 - Local JSON memory fallback in `.raphi_memory/`
+- Citation memory in Postgres via `CITATION_DATABASE_URL`, with `data/citation_index.sqlite` fallback
 - Pickle-based model cache in `.model_cache/`
 - JSON and JSONL state for settings, portfolio, and conviction ledger
 - Fernet-encrypted A2A session mapping
@@ -138,6 +141,39 @@ Yes, the project can remember past conversation context.
 - Entry point: `backend/graph_memory.py`
 
 That means memory is still available even when Neo4j is offline. When Neo4j is unavailable, RAPHI uses the local fallback instead of silently disabling durable memory.
+
+## Citation Memory
+
+RAPHI now uses a local-first citation engine for agent evidence.
+
+Workflow:
+
+```text
+User asks question
+↓
+Search local citation index
+↓
+Index local SEC filings and XBRL citations
+↓
+Check market, ML, GNN, and portfolio tools
+↓
+If evidence is still missing and refresh is requested, ingest Firecrawl results
+↓
+Answer with durable citations
+```
+
+Primary backend:
+
+- Postgres when `CITATION_DATABASE_URL` is configured
+
+Local fallback:
+
+- SQLite FTS5 at `data/citation_index.sqlite`
+
+Core implementation:
+
+- `backend/citation_index.py`
+- `backend/web_citations.py`
 
 ## Response Speed and Caching
 
@@ -336,6 +372,10 @@ Current repo test coverage includes:
 - `PUT /api/portfolio`
 - `GET /api/signals`
 - `GET /api/alerts`
+- `GET /api/citations/status`
+- `POST /api/citations/index`
+- `POST /api/citations/sec/{ticker}/index`
+- `GET /api/citations/search`
 - `GET /api/models/optimization`
 - `POST /api/models/rl/update`
 - `GET /api/stock/{ticker}/optimization`

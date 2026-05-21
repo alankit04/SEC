@@ -28,6 +28,7 @@ Run:
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -76,6 +77,7 @@ from model_optimization import (
     optimization_status,
     optimize_from_conviction_ledger,
 )
+from citation_index import CitationDocument, get_citation_index
 import raphi_mcp_server as mcp_bridge
 import edgar_live
 import firecrawl_client
@@ -110,6 +112,7 @@ engine    = SignalEngine()
 portfolio = PortfolioManager()
 memory    = get_graph_memory()
 gnn       = GNNSignalEngine.get(sec)
+citations = get_citation_index()
 
 # ══════════════════════════════════════════════════════════════════════
 # A2A AGENT CARD  — describes the RAPHI swarm to the outside world
@@ -306,6 +309,18 @@ def _load_settings() -> dict:
         with open(SETTINGS_FILE) as f:
             return json.load(f)
     return {"watchlist": DEFAULT_WATCHLIST}
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float):
+        return None if math.isnan(value) or math.isinf(value) else value
+    return value
 
 
 def _ticker_symbol(raw: str) -> str:
@@ -538,7 +553,7 @@ def stock_detail(ticker: str, request: Request):
     data = _apply_ticker_identity(ticker, market.stock_detail(ticker))
     if "error" in data:
         raise HTTPException(404, data["error"])
-    return data
+    return _json_safe(data)
 
 
 @api.get("/stock/{ticker}/news")
@@ -701,6 +716,17 @@ class WebCitationRequest(BaseModel):
     query: str
     ticker: str = ""
     limit: int = 5
+    refresh_if_missing: bool = False
+
+
+class CitationIndexRequest(BaseModel):
+    ticker: str = ""
+    source_type: str = "web"
+    title: str = ""
+    url: str = ""
+    text: str = ""
+    published_at: str = ""
+    refresh_url: bool = False
 
 
 @api.post("/firecrawl/scrape")
@@ -728,16 +754,73 @@ def firecrawl_search_route(body: FirecrawlSearchRequest, request: Request):
     return {"results": [r for r in results if r.get("success")], "count": len(results)}
 
 
+@api.get("/citations/status")
+@limiter.limit("60/minute")
+def citations_status(request: Request):
+    return citations.status()
+
+
+@api.post("/citations/index")
+@limiter.limit("20/minute")
+def citations_index_route(body: CitationIndexRequest, request: Request):
+    ticker = _ticker_symbol(body.ticker) if body.ticker else ""
+    text = body.text
+    title = body.title
+    if body.refresh_url:
+        if not body.url.startswith("https://"):
+            raise HTTPException(422, "url must start with https:// when refresh_url is true")
+        scraped = firecrawl_client.scrape_url(body.url, max_chars=12000)
+        if not scraped.get("success"):
+            raise HTTPException(502, scraped.get("error", "scrape failed"))
+        text = scraped.get("markdown", "")
+        title = title or scraped.get("title", "")
+    added = citations.add_document(CitationDocument(
+        ticker=ticker,
+        source_type=body.source_type,
+        title=title,
+        url=body.url,
+        text=text,
+        published_at=body.published_at,
+    ))
+    return {"ticker": ticker, **added}
+
+
+@api.post("/citations/sec/{ticker}/index")
+@limiter.limit("20/minute")
+def citations_index_sec_route(ticker: str, request: Request, limit_filings: int = 8):
+    ticker = _ticker_symbol(ticker)
+    return citations.ingest_sec_ticker(sec, ticker, limit_filings=min(max(int(limit_filings), 1), 20))
+
+
+@api.get("/citations/search")
+@limiter.limit("60/minute")
+def citations_search_route(
+    request: Request,
+    q: str,
+    ticker: Optional[str] = None,
+    limit: int = 5,
+    refresh: bool = False,
+):
+    scoped_ticker = _ticker_symbol(ticker) if ticker else ""
+    return citations.search_with_refresh(
+        q,
+        ticker=scoped_ticker,
+        limit=min(max(int(limit), 1), 10),
+        refresh_if_missing=bool(refresh),
+    )
+
+
 @api.post("/web/citations")
 @limiter.limit("20/minute")
 def web_citations_route(body: WebCitationRequest, request: Request):
-    """Firecrawl-backed web citation search for Perplexity-like sourced answers."""
+    """Local-first citation search, with optional Firecrawl refresh."""
     ticker = _ticker_symbol(body.ticker) if body.ticker else ""
     limit = min(max(int(body.limit), 1), 10)
     result = web_citations.search_citations(
         body.query,
         ticker=ticker,
         limit=limit,
+        refresh_if_missing=body.refresh_if_missing,
     )
     if result.get("error") and not result.get("results"):
         raise HTTPException(502, result["error"])
@@ -1561,6 +1644,7 @@ def _collect_local_agent_context(
         lower,
         _re.I,
     ))
+    want_agentic = want_sec_financials or want_gnn
 
     ctx: dict = {
         "ticker": ticker,
@@ -1603,6 +1687,12 @@ def _collect_local_agent_context(
             ctx["sec"]["financial_citations"] = sec.company_financial_citations(ticker)
         except Exception as exc:
             ctx["sec"]["financial_citations_error"] = str(exc)
+
+    if want_sec_financials or want_agentic:
+        try:
+            ctx["citation_index"] = citations.ingest_sec_ticker(sec, ticker, limit_filings=8)
+        except Exception as exc:
+            ctx["citation_index"] = {"error": str(exc)}
 
     try:
         ctx["gnn"]["status"] = gnn.status()
@@ -1661,7 +1751,12 @@ def _collect_local_agent_context(
     if want_web_citations:
         query = f"{ticker} {message} investment analysis source"
         try:
-            ctx["web_citations"] = web_citations.search_citations(query, ticker=ticker, limit=5)
+            ctx["web_citations"] = web_citations.search_citations(
+                query,
+                ticker=ticker,
+                limit=5,
+                refresh_if_missing=True,
+            )
         except Exception as exc:
             ctx["web_citations"] = {"provider": "web_citations", "results": [], "count": 0, "error": str(exc)}
 

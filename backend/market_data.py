@@ -19,6 +19,25 @@ def _safe_float(v) -> "float | None":
     except (TypeError, ValueError):
         return None
 
+
+def _safe_int(v) -> "int | None":
+    f = _safe_float(v)
+    return int(f) if f is not None else None
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return _safe_float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    return value
+
 # Try VADER for sentiment; fall back to keyword scoring
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -113,11 +132,11 @@ class MarketData:
             for ts, row in hist.iterrows():
                 chart.append({
                     "date":   ts.strftime("%Y-%m-%d"),
-                    "open":   round(float(row["Open"]),  2),
-                    "high":   round(float(row["High"]),  2),
-                    "low":    round(float(row["Low"]),   2),
-                    "close":  round(float(row["Close"]), 2),
-                    "volume": int(row["Volume"]),
+                    "open":   round(open_, 2) if (open_ := _safe_float(row["Open"])) is not None else None,
+                    "high":   round(high_, 2) if (high_ := _safe_float(row["High"])) is not None else None,
+                    "low":    round(low_, 2) if (low_ := _safe_float(row["Low"])) is not None else None,
+                    "close":  round(close_, 2) if (close_ := _safe_float(row["Close"])) is not None else None,
+                    "volume": _safe_int(row["Volume"]),
                 })
 
             rev_growth = None
@@ -155,7 +174,7 @@ class MarketData:
                 "revenue_growth": rev_growth,
                 "chart":         chart,
             }
-            return self._set(key, result)
+            return self._set(key, _json_safe(result))
         except Exception as e:
             return {"ticker": ticker, "error": str(e)}
 

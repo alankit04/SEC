@@ -18,4 +18,5 @@ cryptography>=42.0.0
 slowapi>=0.1.9
 limits>=3.12.0
 firecrawl-py>=1.0.0
+psycopg[binary]>=3.2.0
 pytest>=9.0.0

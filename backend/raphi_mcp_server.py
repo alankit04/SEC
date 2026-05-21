@@ -484,8 +484,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="web_citations",
             description=(
-                "Perplexity-style web citation search via Firecrawl. "
-                "Returns title, snippet, URL, provider, and retrieved_at."
+                "Local-first citation search. Searches RAPHI's durable citation index first, "
+                "then optionally refreshes missing evidence through Firecrawl."
             ),
             inputSchema={
                 "type": "object",
@@ -502,6 +502,11 @@ async def list_tools() -> list[types.Tool]:
                         "description": "Number of citation results to return.",
                         "minimum": 1,
                         "maximum": 10,
+                    },
+                    "refresh_if_missing": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Use Firecrawl to add new sources only if local index has insufficient evidence.",
                     },
                 },
                 "required": ["query"],
@@ -718,6 +723,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     "query": query,
                     "ticker": ticker,
                     "limit": limit,
+                    "refresh_if_missing": bool(arguments.get("refresh_if_missing", False)),
                 })
 
             else:

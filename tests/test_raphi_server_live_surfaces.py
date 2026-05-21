@@ -11,6 +11,7 @@ os.environ.pop("RAPHI_API_KEY", None)
 os.environ.pop("SENTRY_DSN", None)
 
 import raphi_server
+from citation_index import CitationDocument, CitationIndex
 
 
 class FakeMarket:
@@ -37,6 +38,24 @@ class FakeMarket:
             "source": "Yahoo Finance via yfinance",
             "quote_url": f"https://finance.yahoo.com/quote/{ticker}",
         }
+
+
+def test_stock_detail_endpoint_serializes_nan_chart_values(monkeypatch):
+    class NaNMarket(FakeMarket):
+        def stock_detail(self, ticker):
+            return {
+                "ticker": ticker,
+                "price": 100.0,
+                "chart": [{"date": "2026-01-01", "open": float("nan"), "close": 100.0}],
+            }
+
+    monkeypatch.setattr(raphi_server, "market", NaNMarket())
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/stock/AAPL")
+
+    assert response.status_code == 200
+    assert response.json()["chart"][0]["open"] is None
 
 
 class FakePortfolio:
@@ -158,3 +177,24 @@ def test_stock_optimization_endpoint_reports_policy_and_cached_artifact_state():
     assert "q_values" in data["rl_policy"]
     assert "distilled_student" in data
     assert "quantized_student" in data
+
+
+def test_citations_search_endpoint_uses_local_index(monkeypatch, tmp_path):
+    idx = CitationIndex(database_url="", sqlite_path=tmp_path / "citations.sqlite")
+    idx.add_document(CitationDocument(
+        ticker="ASST",
+        source_type="sec_filing",
+        title="ASST 8-K Merger Filing",
+        url="https://www.sec.gov/Archives/edgar/data/123/000123/",
+        text="ASST Strive merger citation from SEC filing evidence.",
+    ))
+    monkeypatch.setattr(raphi_server, "citations", idx)
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/citations/search?q=Strive merger&ticker=ASST")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "local_citation_index"
+    assert data["count"] >= 1
+    assert data["results"][0]["url"].startswith("https://www.sec.gov/")

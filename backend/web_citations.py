@@ -1,29 +1,22 @@
-"""web_citations.py — Perplexity-style web citation search via Firecrawl."""
+"""web_citations.py — local-first citation search with optional Firecrawl refresh."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 import time
-from urllib.parse import urlparse
 
 try:
-    import firecrawl_client
+    from citation_index import CitationIndex, get_citation_index
 except ImportError:  # pragma: no cover
-    from backend import firecrawl_client
+    from backend.citation_index import CitationIndex, get_citation_index
 
 _SEARCH_TTL = 900
 _cache: dict[str, tuple[float, dict]] = {}
+_index = get_citation_index()
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _domain(url: str) -> str:
-    try:
-        return urlparse(url).netloc.replace("www.", "")
-    except Exception:
-        return ""
 
 
 def _cached(key: str):
@@ -39,27 +32,12 @@ def _store(key: str, value: dict) -> dict:
 
 
 def provider_status() -> dict:
+    status = _index.status()
     return {
-        "firecrawl_configured": firecrawl_client.is_available(),
-        "primary_provider": "firecrawl_search",
-        "required_env": ["FIRECRAWL_API_KEY"],
-    }
-
-
-def _normalize_firecrawl_item(item: dict, idx: int) -> dict:
-    url = item.get("url", "")
-    markdown = item.get("markdown", "") or ""
-    snippet = item.get("description") or markdown.replace("\n", " ")[:280]
-    return {
-        "id": idx,
-        "title": item.get("title", ""),
-        "url": url,
-        "domain": _domain(url),
-        "snippet": snippet,
-        "display_link": _domain(url),
-        "published": "",
-        "provider": "Firecrawl Search",
-        "retrieved_at": _now_iso(),
+        **status,
+        "primary_provider": "local_citation_index",
+        "refresh_provider": "firecrawl_search",
+        "required_refresh_env": ["FIRECRAWL_API_KEY"],
     }
 
 
@@ -68,6 +46,8 @@ def search_citations(
     *,
     ticker: str = "",
     limit: int = 5,
+    refresh_if_missing: bool = False,
+    index: CitationIndex | None = None,
 ) -> dict:
     clean_query = " ".join(str(query or "").split())[:500]
     ticker = str(ticker or "").strip().upper()
@@ -77,34 +57,27 @@ def search_citations(
     if not clean_query:
         return {"provider": "none", "query": clean_query, "results": [], "count": 0, "error": "query is required"}
 
-    cache_key = f"{clean_query}:{ticker}:{limit}:firecrawl"
+    cache_key = f"{clean_query}:{ticker}:{limit}:{refresh_if_missing}:local_index"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
 
-    if firecrawl_client.is_available():
-        results_raw = firecrawl_client.search_web(clean_query, limit=limit, scrape_results=True, max_chars_per_result=1600)
-        results = [
-            _normalize_firecrawl_item(item, idx)
-            for idx, item in enumerate(results_raw, start=1)
-            if item.get("success") and item.get("url")
-        ]
-        errors = [item.get("error") for item in results_raw if not item.get("success") and item.get("error")]
-        return _store(cache_key, {
-            "provider": "firecrawl_search",
-            "query": clean_query,
-            "results": results,
-            "count": len(results),
-            "error": errors[0] if errors and not results else None,
-            "retrieved_at": _now_iso(),
-            "source_note": "Firecrawl search fallback",
-        })
-
+    citation_index = index or _index
+    result = citation_index.search_with_refresh(
+        clean_query,
+        ticker=ticker,
+        limit=limit,
+        refresh_if_missing=refresh_if_missing,
+        min_results=2,
+    )
+    result.setdefault("source_note", "RAPHI local citation index")
+    result.setdefault("retrieved_at", _now_iso())
+    if not result.get("results"):
+        result["error"] = (
+            result.get("refresh", {}).get("error")
+            or "No local citation results found. Run citation refresh/indexing for this source."
+        )
     return _store(cache_key, {
-        "provider": "none",
-        "query": clean_query,
-        "results": [],
-        "count": 0,
-        "error": "No web citation provider configured. Set FIRECRAWL_API_KEY.",
+        **result,
         "retrieved_at": _now_iso(),
     })
