@@ -2070,7 +2070,7 @@ class ChatRequest(BaseModel):
 
 
 @api.post("/chat")
-@limiter.limit("5/minute")
+@limiter.limit("10/minute")
 async def chat(req: ChatRequest, request: Request):
     import json, asyncio
 
@@ -2157,11 +2157,12 @@ Presentation rules for the RAPHI web console:
         async def missing_key_response():
             yield _sse("step", json.dumps({
                 "id": "memory",
-                "label": "Permanent memory checked; Claude key is not configured",
+                "label": "Permanent memory checked; full synthesis is temporarily unavailable",
             }))
             fallback = (
-                "I can store and retrieve permanent memory, but full AI responses need "
-                "ANTHROPIC_API_KEY in .env. Add that key and restart RAPHI to enable chat."
+                "RAPHI can still store and retrieve durable memory, but the full research "
+                "synthesis engine is temporarily unavailable in this runtime. Please try "
+                "again after the AI service is reconnected."
             )
             try:
                 memory.remember_interaction(
@@ -2317,7 +2318,7 @@ async def generate_memo(ticker: str, request: Request):
     ticker = _ticker_symbol(ticker)
     api_key_anthropic = _anthropic_api_key()
     if not api_key_anthropic:
-        raise HTTPException(422, "ANTHROPIC_API_KEY not set")
+        raise HTTPException(503, "AI synthesis service is temporarily unavailable")
 
     detail = market.stock_detail(ticker)
     news   = market.stock_news(ticker, limit=5)

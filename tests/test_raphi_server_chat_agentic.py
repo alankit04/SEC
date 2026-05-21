@@ -100,6 +100,26 @@ def test_chat_rejects_prompt_injection_before_agent(monkeypatch):
     assert fake_agent.calls == []
 
 
+def test_missing_ai_runtime_response_does_not_leak_configuration(monkeypatch):
+    monkeypatch.setattr(raphi_server, "_anthropic_api_key", lambda: "")
+    monkeypatch.setattr(raphi_server, "memory", FakeMemory())
+    monkeypatch.setattr(raphi_server, "market", FakeMarket())
+    monkeypatch.setattr(raphi_server, "portfolio", FakePortfolio())
+    client = TestClient(raphi_server.app)
+
+    response = client.post(
+        "/api/chat",
+        json={"message": "Analyze TSLA filings", "ticker": "TSLA"},
+    )
+
+    body = response.text
+    assert response.status_code == 200
+    assert "temporarily unavailable" in body
+    assert "ANTHROPIC_API_KEY" not in body
+    assert ".env" not in body
+    assert "Claude key" not in body
+
+
 def test_chat_fallback_runs_local_specialist_context(monkeypatch):
     fake_agent = EmptyAgent()
     fake_memory = FakeMemory()

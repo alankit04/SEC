@@ -3753,7 +3753,7 @@ async function loadSettingsPage(signal) {
 
     const keyStatus = document.querySelector('#page-settings .api-key-status, #anthroKeyStatus');
     if (keyStatus) {
-      keyStatus.textContent = d.anthropic_api_key_set ? '✓ Anthropic API key configured' : '✗ Anthropic API key not set';
+      keyStatus.textContent = d.anthropic_api_key_set ? '✓ AI service connected' : '✗ AI service disconnected';
       keyStatus.style.color = d.anthropic_api_key_set ? 'var(--accent-teal)' : 'var(--accent-red)';
     }
 
@@ -4366,7 +4366,7 @@ function revealRaphiKey() {
 }
 
 function rotateRaphiKey() {
-  showToast('Local rotation requires changing RAPHI_API_KEY in .env and restarting the server', true);
+  showToast('Local key rotation requires updating the runtime configuration and restarting the server', true);
 }
 
 // ── TICKER SEARCH (topbar) ────────────────────────────────────────────
