@@ -1,10 +1,13 @@
 # RAPHI
 
-RAPHI is a local research assistant for SEC and market analysis. It gathers evidence (SEC filings + market context), runs guarded AI synthesis, and produces citation-backed research responses in a browser UI.
+RAPHI is a local agentic AI for SEC and market analysis. It plans tasks, routes specialist tool calls, gathers evidence (SEC filings + market context), and produces citation-backed responses in a browser UI.
+
+It orchestrates tools through A2A/MCP flows for traceable, multi-step execution.
 
 ## What This Project Does
 
 - Accepts a ticker or research question in chat.
+- Plans and executes multi-step agentic research workflows.
 - Pulls SEC filing data and market context.
 - Uses guardrailed AI flows to generate a structured answer.
 - Enforces evidence and quality checks (citations, unsupported-claim controls, trace/run records).
@@ -13,7 +16,7 @@ RAPHI is a local research assistant for SEC and market analysis. It gathers evid
 ## Why It Is Useful
 
 - Faster first-pass equity research with linked evidence.
-- Better transparency than a plain chatbot (citations + run status).
+- Better transparency than a plain chatbot (tool-driven retrieval, citations, run status).
 - Local-first workflow for development, testing, and iteration.
 - Useful for analysts, AI engineers, and teams building auditable research assistants.
 
