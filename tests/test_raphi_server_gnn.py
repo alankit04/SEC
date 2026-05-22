@@ -19,6 +19,11 @@ API_HEADERS = {
     "X-Tenant-Id": "unit",
 }
 
+ACTION_HEADERS = {
+    **API_HEADERS,
+    "X-Action-Approval": "approved",
+}
+
 
 class FakeGNN:
     def __init__(self):
@@ -80,7 +85,7 @@ def test_unified_server_exposes_batch_status_and_synchronous_training(monkeypatc
     status_response = client.get("/api/gnn/status", headers=API_HEADERS)
     train_response = client.post(
         "/api/gnn/train",
-        headers=API_HEADERS,
+        headers=ACTION_HEADERS,
         json={"tickers": ["msft", "nvda"], "force": False, "background": False},
     )
 
