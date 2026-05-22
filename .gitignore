@@ -40,7 +40,6 @@ credentials.json
 .claude/
 =1.0.0
 company_tickers.json
-homepage.html
 raphi_dashboard.html
 
 # ── Claude Code ─────────────────────────────────────────────────────
