@@ -2,8 +2,8 @@
 raphi_mcp_server.py — RAPHI MCP Server (stdio transport)
 
 Security fixes applied:
-  H1 / M3  X-Internal-Token header on every httpx call to FastAPI (set RAPHI_INTERNAL_TOKEN)
-  M1        Ticker symbol validated against strict regex ^[A-Z]{1,5}$ before use in URLs
+    H1 / M3  X-Internal-Token header on every httpx call to FastAPI (set RAPHI_INTERNAL_TOKEN)
+    M1        Ticker symbol validated against strict regex ^[A-Z]{1,5}(?:\.[A-Z])?$ before use in URLs
 
 Requires the unified RAPHI server to be running on :9999.
 
@@ -17,12 +17,19 @@ import json
 import logging
 import os
 import re
+import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+
+try:
+    from tool_result_cache import ToolResultCache
+except ImportError:  # pragma: no cover
+    from backend.tool_result_cache import ToolResultCache
 
 logger = logging.getLogger("raphi.mcp")
 
@@ -32,8 +39,8 @@ app      = Server("raphi")
 # H1/M3: Shared secret between MCP server and FastAPI backend
 _INTERNAL_TOKEN = os.environ.get("RAPHI_INTERNAL_TOKEN", "")
 
-# M1: Strict ticker allowlist regex — A–Z, 1–5 chars (covers NYSE/NASDAQ/BRK.B style)
-_TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
+# M1: Strict ticker allowlist regex — A–Z (1–5), optional class suffix (e.g. BRK.B)
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:\.[A-Z])?$")
 
 # Figma integration (MCP-backed):
 # - FIGMA_ACCESS_TOKEN: Personal access token / OAuth bearer
@@ -41,13 +48,179 @@ _TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
 _FIGMA_TOKEN = os.environ.get("FIGMA_ACCESS_TOKEN", "").strip()
 _FIGMA_FILE_KEY = os.environ.get("FIGMA_FILE_KEY", "").strip()
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+MODEL_CACHE_DIR = PROJECT_ROOT / ".model_cache"
+PORTFOLIO_FILE = PROJECT_ROOT / "portfolio.json"
+SETTINGS_FILE = PROJECT_ROOT / "settings.json"
+CITATION_SQLITE = DATA_DIR / "citation_index.sqlite"
+
+_TOOL_RESULT_CACHE = ToolResultCache(
+    default_ttl_s=int(os.environ.get("RAPHI_TOOL_CACHE_DEFAULT_TTL_S", "120")),
+    default_stale_grace_s=int(os.environ.get("RAPHI_TOOL_CACHE_STALE_GRACE_S", "60")),
+)
+
+_TOOL_TTLS_S: dict[str, int] = {
+    "market_overview": 45,
+    "stock_detail": 60,
+    "stock_news": 900,
+    "sec_filings": 7200,
+    "sec_search": 3600,
+    "sec_universe": 3600,
+    "sec_industries": 3600,
+    "ml_signal": 3600,
+    "gnn_signal": 3600,
+    "gnn_status": 120,
+    "portfolio_snapshot": 30,
+    "portfolio_alerts": 30,
+    "memory_status": 30,
+    "memory_retrieve": 30,
+    "edgar_live_filings": 300,
+    "edgar_search_fulltext": 600,
+    "firecrawl_scrape": 1200,
+    "firecrawl_search": 900,
+    "web_citations": 900,
+}
+
+_TOOL_SOURCES: dict[str, str] = {
+    "market_overview": "Yahoo Finance via yfinance",
+    "stock_detail": "Yahoo Finance via yfinance",
+    "stock_news": "Yahoo Finance via yfinance",
+    "sec_filings": "SEC Financial Statement Data Sets",
+    "sec_search": "SEC Financial Statement Data Sets",
+    "sec_universe": "SEC Financial Statement Data Sets",
+    "sec_industries": "SEC Financial Statement Data Sets",
+    "ml_signal": "SignalEngine (.model_cache)",
+    "gnn_signal": "GNN model state (.model_cache)",
+    "gnn_status": "GNN model state (.model_cache)",
+    "portfolio_snapshot": "Local portfolio",
+    "portfolio_alerts": "Local portfolio",
+    "memory_status": "Graph memory",
+    "memory_retrieve": "Graph memory",
+    "edgar_live_filings": "SEC EDGAR live",
+    "edgar_search_fulltext": "SEC EDGAR EFTS",
+    "firecrawl_scrape": "Firecrawl",
+    "firecrawl_search": "Firecrawl",
+    "web_citations": "RAPHI citation index",
+}
+
+_VERSION_MEMO: dict[str, tuple[float, str]] = {}
+_VERSION_MEMO_TTL_S = 20
+
+
+def _cached_mtime_version(label: str, path: Path) -> str:
+    key = f"{label}:{path}"
+    now = time.time()
+    cached = _VERSION_MEMO.get(key)
+    if cached and (now - cached[0]) < _VERSION_MEMO_TTL_S:
+        return cached[1]
+    try:
+        stamp = int(path.stat().st_mtime)
+    except Exception:
+        stamp = 0
+    value = f"{label}-v{stamp}"
+    _VERSION_MEMO[key] = (now, value)
+    return value
+
+
+def _tool_ttl(name: str) -> int:
+    return int(_TOOL_TTLS_S.get(name, 120))
+
+
+def _sanitize_scope(value: str) -> str:
+    clean = re.sub(r"[^a-zA-Z0-9_.:@+-]", "_", str(value or "").strip())
+    return clean[:128] if clean else ""
+
+
+def _tool_scope(name: str, arguments: dict) -> str:
+    if name in {"portfolio_snapshot", "portfolio_alerts", "memory_status", "memory_retrieve"}:
+        argument_scope = _sanitize_scope(arguments.get("__user_scope", ""))
+        if argument_scope:
+            return argument_scope
+        return os.environ.get("RAPHI_CACHE_USER_SCOPE", "local-user")
+    return "global"
+
+
+def _tool_data_version(name: str, arguments: dict) -> str:
+    if name in {"sec_filings", "sec_search", "sec_universe", "sec_industries"}:
+        return _cached_mtime_version("sec-data", DATA_DIR)
+    if name in {"portfolio_snapshot", "portfolio_alerts"}:
+        return _cached_mtime_version("portfolio", PORTFOLIO_FILE)
+    if name in {"memory_status", "memory_retrieve"}:
+        return _cached_mtime_version("memory-settings", SETTINGS_FILE)
+    if name in {"web_citations"}:
+        return _cached_mtime_version("citation-index", CITATION_SQLITE)
+    if name in {"market_overview", "stock_detail", "stock_news"}:
+        return os.environ.get("RAPHI_MARKET_DATA_VERSION", "yfinance-v1")
+    if name in {"edgar_live_filings", "edgar_search_fulltext"}:
+        return os.environ.get("RAPHI_EDGAR_DATA_VERSION", "edgar-live-v1")
+    if name in {"firecrawl_scrape", "firecrawl_search"}:
+        return os.environ.get("RAPHI_FIRECRAWL_DATA_VERSION", "firecrawl-v1")
+    if name in {"ml_signal", "gnn_signal", "gnn_status"}:
+        return _cached_mtime_version("model-cache", MODEL_CACHE_DIR)
+    return "v1"
+
+
+def _tool_model_version(name: str, arguments: dict) -> str:
+    ticker = str(arguments.get("ticker", "")).strip().upper()
+    if name == "ml_signal":
+        if ticker:
+            return _cached_mtime_version("ml", MODEL_CACHE_DIR / f"{ticker}.pkl")
+        return _cached_mtime_version("ml", MODEL_CACHE_DIR)
+    if name in {"gnn_signal", "gnn_status"}:
+        return _cached_mtime_version("gnn", MODEL_CACHE_DIR)
+    return ""
+
+
+def _maybe_attach_cache_meta(value, meta: dict):
+    if os.environ.get("RAPHI_CACHE_EXPOSE_META", "0") != "1":
+        return value
+    if isinstance(value, dict):
+        out = dict(value)
+        out["_cache"] = meta
+        return out
+    return {
+        "value": value,
+        "_cache": meta,
+    }
+
+
+async def _http_get_json(client: httpx.AsyncClient, path: str, params: dict | None = None):
+    response = await client.get(path, params=params)
+    return response.json()
+
+
+async def _http_post_json(client: httpx.AsyncClient, path: str, payload: dict):
+    response = await client.post(path, json=payload)
+    return response.json()
+
+
+async def _cached_tool_json(
+    *,
+    name: str,
+    arguments: dict,
+    producer,
+):
+    value, meta = await _TOOL_RESULT_CACHE.get_or_compute(
+        tool_name=name,
+        arguments=arguments,
+        source=_TOOL_SOURCES.get(name, "RAPHI tool"),
+        producer=producer,
+        ttl_s=_tool_ttl(name),
+        stale_grace_s=max(0, _tool_ttl(name) // 2),
+        data_version=_tool_data_version(name, arguments),
+        model_version=_tool_model_version(name, arguments),
+        user_scope=_tool_scope(name, arguments),
+    )
+    return _maybe_attach_cache_meta(value, meta)
+
 
 def _validate_ticker(raw: str) -> str:
     """Uppercase and validate ticker. Raises ValueError if invalid."""
     ticker = raw.strip().upper()
     if not _TICKER_RE.match(ticker):
         raise ValueError(
-            f"Invalid ticker '{ticker}'. Must be 1–5 uppercase letters (e.g. NVDA, AAPL)."
+            f"Invalid ticker '{ticker}'. Must be 1–5 uppercase letters with optional class suffix (e.g. NVDA, BRK.B)."
         )
     return ticker
 
@@ -121,8 +294,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker symbol (e.g. NVDA). Must be 1–5 uppercase letters.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker symbol (e.g. NVDA, BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     }
                 },
                 "required": ["ticker"],
@@ -136,8 +309,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker symbol. Must be 1–5 uppercase letters.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker symbol (e.g. NVDA, BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     }
                 },
                 "required": ["ticker"],
@@ -151,8 +324,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker symbol. Must be 1–5 uppercase letters.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker symbol (e.g. NVDA, BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     }
                 },
                 "required": ["ticker"],
@@ -199,8 +372,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker symbol. Must be 1–5 uppercase letters.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker symbol (e.g. NVDA, BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     }
                 },
                 "required": ["ticker"],
@@ -214,8 +387,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker symbol. Must be 1–5 uppercase letters.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker symbol (e.g. NVDA, BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     }
                 },
                 "required": ["ticker"],
@@ -234,7 +407,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "tickers": {
                         "type": "array",
-                        "items": {"type": "string", "pattern": "^[A-Z]{1,5}$"},
+                        "items": {"type": "string", "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$"},
                         "description": "Optional ticker universe. Defaults to the RAPHI watchlist.",
                     },
                     "force": {
@@ -371,8 +544,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "ticker": {
                         "type": "string",
-                        "description": "Stock ticker (1–5 uppercase letters).",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "description": "Stock ticker (supports class suffix like BRK.B).",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     },
                     "days": {
                         "type": "integer",
@@ -403,7 +576,7 @@ async def list_tools() -> list[types.Tool]:
                     "ticker": {
                         "type": "string",
                         "description": "Optional ticker to restrict search to one company.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     },
                     "forms": {
                         "type": "array",
@@ -494,7 +667,7 @@ async def list_tools() -> list[types.Tool]:
                     "ticker": {
                         "type": "string",
                         "description": "Optional stock ticker for query scoping.",
-                        "pattern": "^[A-Z]{1,5}$",
+                        "pattern": "^[A-Z]{1,5}(?:\\.[A-Z])?$",
                     },
                     "limit": {
                         "type": "integer",
@@ -520,28 +693,55 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     headers = _get_headers()
     async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=120.0) as client:
         try:
+            r = None
+            data = None
             if name == "market_overview":
-                r = await client.get("/api/market/overview")
+                clean_args: dict = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/market/overview"),
+                )
 
             elif name == "stock_detail":
                 ticker = _validate_ticker(arguments["ticker"])
-                r = await client.get(f"/api/stock/{ticker}")
+                clean_args = {"ticker": ticker}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}"),
+                )
 
             elif name == "stock_news":
                 ticker = _validate_ticker(arguments["ticker"])
-                r = await client.get(f"/api/stock/{ticker}/news")
+                clean_args = {"ticker": ticker}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/news"),
+                )
 
             elif name == "sec_filings":
                 ticker = _validate_ticker(arguments["ticker"])
-                r = await client.get(f"/api/stock/{ticker}/filings")
+                clean_args = {"ticker": ticker}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/filings"),
+                )
 
             elif name == "sec_search":
                 q = str(arguments.get("q", ""))[:200]   # cap search query length
                 limit = min(int(arguments.get("limit", 20)), 100)
-                r = await client.get("/api/sec/search", params={"q": q, "limit": limit})
+                clean_args = {"q": q, "limit": limit}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/sec/search", params=clean_args),
+                )
 
             elif name == "sec_universe":
-                params = {
+                clean_args = {
                     "q": str(arguments.get("q", ""))[:200],
                     "sic": str(arguments.get("sic", ""))[:4],
                     "industry": str(arguments.get("industry", ""))[:80],
@@ -549,21 +749,45 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     "tickered_only": bool(arguments.get("tickered_only", True)),
                     "limit": min(int(arguments.get("limit", 50)), 500),
                 }
-                r = await client.get("/api/sec/universe", params=params)
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/sec/universe", params=clean_args),
+                )
 
             elif name == "sec_industries":
-                r = await client.get("/api/sec/industries")
+                clean_args = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/sec/industries"),
+                )
 
             elif name == "ml_signal":
                 ticker = _validate_ticker(arguments["ticker"])
-                r = await client.get(f"/api/stock/{ticker}/signals")
+                clean_args = {"ticker": ticker}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/signals"),
+                )
 
             elif name == "gnn_signal":
                 ticker = _validate_ticker(arguments["ticker"])
-                r = await client.get(f"/api/stock/{ticker}/gnn")
+                clean_args = {"ticker": ticker}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/gnn"),
+                )
 
             elif name == "gnn_status":
-                r = await client.get("/api/gnn/status")
+                clean_args = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/gnn/status"),
+                )
 
             elif name == "gnn_train":
                 raw_tickers = arguments.get("tickers") or []
@@ -574,20 +798,44 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     "background": bool(arguments.get("background", True)),
                 }
                 r = await client.post("/api/gnn/train", json=payload)
+                data = r.json()
+                await _TOOL_RESULT_CACHE.invalidate_tool("gnn_status")
+                await _TOOL_RESULT_CACHE.invalidate_tool("gnn_signal")
+                await _TOOL_RESULT_CACHE.invalidate_tool("ml_signal")
 
             elif name == "portfolio_snapshot":
-                r = await client.get("/api/portfolio")
+                clean_args = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/portfolio"),
+                )
 
             elif name == "portfolio_alerts":
-                r = await client.get("/api/alerts")
+                clean_args = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/alerts"),
+                )
 
             elif name == "memory_status":
-                r = await client.get("/api/memory/status")
+                clean_args = {}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/memory/status"),
+                )
 
             elif name == "memory_retrieve":
                 q = str(arguments.get("q", ""))[:1000]
                 limit = min(int(arguments.get("limit", 8)), 25)
-                r = await client.get("/api/memory/retrieve", params={"q": q, "limit": limit})
+                clean_args = {"q": q, "limit": limit}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/memory/retrieve", params=clean_args),
+                )
 
             elif name == "figma_status":
                 data = {
@@ -683,7 +931,12 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             elif name == "edgar_live_filings":
                 ticker = _validate_ticker(arguments["ticker"])
                 days = min(int(arguments.get("days", 60)), 365)
-                r = await client.get(f"/api/stock/{ticker}/live-filings", params={"days": days})
+                clean_args = {"ticker": ticker, "days": days}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/live-filings", params={"days": days}),
+                )
 
             elif name == "edgar_search_fulltext":
                 query = str(arguments.get("query", ""))[:300]
@@ -697,7 +950,12 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     params["ticker"] = ticker_param
                 if forms:
                     params["forms"] = ",".join(forms)
-                r = await client.get("/api/edgar/search", params=params)
+                clean_args = dict(params)
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_get_json(client, "/api/edgar/search", params=params),
+                )
 
             # ── Firecrawl tools ────────────────────────────────────────────────
             elif name == "firecrawl_scrape":
@@ -705,26 +963,39 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                 if not url.startswith("https://"):
                     raise ValueError("firecrawl_scrape: url must start with https://")
                 max_chars = min(int(arguments.get("max_chars", 6000)), 15000)
-                r = await client.post("/api/firecrawl/scrape",
-                                      json={"url": url, "max_chars": max_chars})
+                clean_args = {"url": url, "max_chars": max_chars}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_post_json(client, "/api/firecrawl/scrape", clean_args),
+                )
 
             elif name == "firecrawl_search":
                 query = str(arguments.get("query", ""))[:500]
                 limit = min(int(arguments.get("limit", 5)), 10)
-                r = await client.post("/api/firecrawl/search",
-                                      json={"query": query, "limit": limit})
+                clean_args = {"query": query, "limit": limit}
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_post_json(client, "/api/firecrawl/search", clean_args),
+                )
 
             elif name == "web_citations":
                 query = str(arguments.get("query", ""))[:500]
                 ticker_raw = str(arguments.get("ticker", "")).strip().upper()
                 ticker = _validate_ticker(ticker_raw) if ticker_raw else ""
                 limit = min(int(arguments.get("limit", 5)), 10)
-                r = await client.post("/api/web/citations", json={
+                clean_args = {
                     "query": query,
                     "ticker": ticker,
                     "limit": limit,
                     "refresh_if_missing": bool(arguments.get("refresh_if_missing", False)),
-                })
+                }
+                data = await _cached_tool_json(
+                    name=name,
+                    arguments=clean_args,
+                    producer=lambda: _http_post_json(client, "/api/web/citations", clean_args),
+                )
 
             else:
                 return [types.TextContent(
@@ -732,7 +1003,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     text=json.dumps({"error": f"Unknown tool: {name}"}),
                 )]
 
-            data = r.json()
+            if data is None and r is not None:
+                data = r.json()
             text = json.dumps(data, default=str)
             if len(text) > 8000:
                 text = text[:8000] + "...(truncated)"
