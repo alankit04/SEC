@@ -8,8 +8,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
 os.environ.pop("RAPHI_API_KEY", None)
 os.environ.pop("SENTRY_DSN", None)
+os.environ["RAPHI_API_KEY"] = "test-key"
 
 import raphi_server
+
+
+API_HEADERS = {
+    "X-API-Key": "test-key",
+    "X-User-Id": "unit-test-user",
+    "X-Tenant-Id": "unit",
+}
 
 
 class FakeGNN:
@@ -43,7 +51,7 @@ class FakeGNN:
             "backend": "numpy-sage",
             "graph_nodes": 3,
             "graph_edges": 2,
-            "tickers": ["CCC", "AAA", "BBB"],
+            "tickers": ["TSLA", "AAPL", "MSFT"],
             "cache_age_h": 0.1,
             "stale": False,
         }
@@ -52,32 +60,33 @@ class FakeGNN:
 def test_unified_server_exposes_gnn_prediction_with_requested_ticker(monkeypatch):
     fake = FakeGNN()
     monkeypatch.setattr(raphi_server, "gnn", fake)
-    monkeypatch.setattr(raphi_server, "_load_settings", lambda: {"watchlist": ["AAA", "BBB"]})
+    monkeypatch.setattr(raphi_server, "_load_settings_for_scope", lambda _scope: {"watchlist": ["AAPL", "MSFT"]})
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/stock/ccc/gnn")
+    response = client.get("/api/stock/tsla/gnn", headers=API_HEADERS)
 
     assert response.status_code == 200
-    assert response.json()["ticker"] == "CCC"
-    assert fake.predict_calls == [("CCC", ["CCC", "AAA", "BBB"])]
+    assert response.json()["ticker"] == "TSLA"
+    assert fake.predict_calls == [("TSLA", ["TSLA", "AAPL", "MSFT"])]
 
 
 def test_unified_server_exposes_batch_status_and_synchronous_training(monkeypatch):
     fake = FakeGNN()
     monkeypatch.setattr(raphi_server, "gnn", fake)
-    monkeypatch.setattr(raphi_server, "_load_settings", lambda: {"watchlist": ["AAA", "BBB"]})
+    monkeypatch.setattr(raphi_server, "_load_settings_for_scope", lambda _scope: {"watchlist": ["AAPL", "GOOGL"]})
     client = TestClient(raphi_server.app)
 
-    batch_response = client.get("/api/gnn/signals?tickers=msft,nvda")
-    status_response = client.get("/api/gnn/status")
+    batch_response = client.get("/api/gnn/signals?tickers=msft,nvda", headers=API_HEADERS)
+    status_response = client.get("/api/gnn/status", headers=API_HEADERS)
     train_response = client.post(
         "/api/gnn/train",
+        headers=API_HEADERS,
         json={"tickers": ["msft", "nvda"], "force": False, "background": False},
     )
 
     assert batch_response.status_code == 200
     assert status_response.status_code == 200
     assert train_response.status_code == 200
-    assert fake.batch_calls == [["MSFT", "NVDA", "AAA", "BBB"]]
-    assert fake.train_calls == [(["MSFT", "NVDA", "AAA", "BBB"], False)]
+    assert fake.batch_calls == [["MSFT", "NVDA", "AAPL", "GOOGL"]]
+    assert fake.train_calls == [(["MSFT", "NVDA", "AAPL", "GOOGL"], False)]
     assert train_response.json()["status"] == "trained"
