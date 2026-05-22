@@ -44,6 +44,7 @@ def provider_status() -> dict:
 def search_citations(
     query: str,
     *,
+    user_scope: str = "global",
     ticker: str = "",
     limit: int = 5,
     refresh_if_missing: bool = False,
@@ -57,7 +58,8 @@ def search_citations(
     if not clean_query:
         return {"provider": "none", "query": clean_query, "results": [], "count": 0, "error": "query is required"}
 
-    cache_key = f"{clean_query}:{ticker}:{limit}:{refresh_if_missing}:local_index"
+    scope = str(user_scope or "global").strip()[:128] or "global"
+    cache_key = f"{scope}:{clean_query}:{ticker}:{limit}:{refresh_if_missing}:local_index"
     cached = _cached(cache_key)
     if cached is not None:
         return cached
@@ -65,6 +67,7 @@ def search_citations(
     citation_index = index or _index
     result = citation_index.search_with_refresh(
         clean_query,
+        user_scope=scope,
         ticker=ticker,
         limit=limit,
         refresh_if_missing=refresh_if_missing,
