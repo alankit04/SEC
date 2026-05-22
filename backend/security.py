@@ -11,10 +11,14 @@ Usage:
     from backend.security import TokenAuth, sanitize_user_input, init_sentry, SessionCipher
 """
 
+import base64
 import hashlib
+import hmac
+import json
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from starlette.requests import Request
@@ -40,6 +44,7 @@ PUBLIC_PATHS = {
     "/.well-known/agent-card.json",   # A2A agent card (current A2A spec)
     "/health",
     "/api/health",                    # unified server health probe
+    "/api/auth/login",               # email-first browser session bootstrap
     "/",                              # dashboard HTML (GET only — POST / is A2A, checked below)
     "/static",                        # static assets prefix
     "/docs",                          # FastAPI Swagger UI
@@ -67,6 +72,54 @@ _INJECTION_RE = [re.compile(p, re.IGNORECASE | re.DOTALL) for p in _INJECTION_PA
 MAX_INPUT_LENGTH = 4000
 
 
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padded = raw + "=" * ((4 - len(raw) % 4) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def issue_browser_session_token(
+    *,
+    user_id: str,
+    tenant: str = "local",
+    role: str = "analyst",
+    secret: str,
+    ttl_seconds: int = 60 * 60 * 12,
+) -> str:
+    now = int(time.time())
+    payload = {
+        "sub": str(user_id).strip(),
+        "tenant": str(tenant).strip().lower() or "local",
+        "role": str(role).strip().lower() or "analyst",
+        "iat": now,
+        "exp": now + max(300, int(ttl_seconds)),
+        "typ": "raphi-session",
+    }
+    body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = _b64url_encode(hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
+    return f"raphi.{body}.{sig}"
+
+
+def decode_browser_session_token(token: str, secret: str) -> dict[str, Any]:
+    parts = str(token or "").split(".")
+    if len(parts) != 3 or parts[0] != "raphi":
+        raise ValueError("Invalid session token format")
+
+    body, sig = parts[1], parts[2]
+    expected = _b64url_encode(hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest())
+    if not hmac.compare_digest(sig, expected):
+        raise ValueError("Invalid session signature")
+
+    payload = json.loads(_b64url_decode(body).decode("utf-8"))
+    exp = int(payload.get("exp") or 0)
+    if exp and int(time.time()) > exp:
+        raise ValueError("Session expired")
+    return payload
+
+
 # ── C2: Bearer / X-API-Key / X-Internal-Token authentication middleware ──
 class TokenAuth:
     """
@@ -88,6 +141,7 @@ class TokenAuth:
         self._jwt_aud = os.environ.get("RAPHI_JWT_AUDIENCE", "").strip()
         self._jwt_iss = os.environ.get("RAPHI_JWT_ISSUER", "").strip()
         self._require_jwt = _env_bool("RAPHI_REQUIRE_JWT", False)
+        self._session_secret = os.environ.get("RAPHI_SESSION_SECRET", "").strip() or api_key
 
     def _decode_jwt(self, token: str) -> dict[str, Any]:
         if jwt is None:
@@ -158,6 +212,21 @@ class TokenAuth:
 
         bearer = request.headers.get("Authorization", "")
         bearer_token = bearer.removeprefix("Bearer ").strip() if bearer.startswith("Bearer ") else ""
+        if bearer_token and self._session_secret:
+            try:
+                claims = decode_browser_session_token(bearer_token, self._session_secret)
+                scope["raphi_auth"] = {
+                    "auth_type": "session",
+                    "sub": str(claims.get("sub") or "").strip(),
+                    "tenant": str(claims.get("tenant") or "local").strip().lower(),
+                    "role": str(claims.get("role") or "analyst").strip().lower(),
+                    "claims": claims,
+                }
+                await self.app(scope, receive, send)
+                return
+            except Exception:
+                pass
+
         if bearer_token and "." in bearer_token and bearer_token.count(".") == 2:
             try:
                 claims = self._decode_jwt(bearer_token)
