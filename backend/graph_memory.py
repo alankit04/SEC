@@ -93,8 +93,14 @@ def tokenize(text: str) -> list[str]:
     return list(dict.fromkeys(t for t in tokens if t not in STOP_WORDS))[:24]
 
 
-def memory_id(kind: str, text: str) -> str:
-    return f"mem-{kind}-{stable_hash(normalize_text(text))}"
+def _normalize_user_id(value: str | None) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_.:@+-]", "_", str(value or "").strip())
+    return normalized[:128] if normalized else DEFAULT_USER_ID
+
+
+def memory_id(kind: str, text: str, *, user_id: str | None = None) -> str:
+    scoped_text = f"{_normalize_user_id(user_id)}::{text}"
+    return f"mem-{kind}-{stable_hash(normalize_text(scoped_text))}"
 
 
 def entity_id(entity_type: str, name: str) -> str:
@@ -346,6 +352,7 @@ class Neo4jGraphMemory:
         assistant_text: str = "",
         source: str = "interaction",
         metadata: Optional[dict[str, Any]] = None,
+        user_id: Optional[str] = None,
         importance: float = 0.55,
     ) -> dict[str, Any]:
         if not self.configured:
@@ -353,6 +360,7 @@ class Neo4jGraphMemory:
         self.setup_schema()
 
         now = utc_now()
+        scoped_user_id = _normalize_user_id(user_id or self.user_id)
         interaction_id = f"int-{uuid.uuid4().hex}"
         candidates = extract_memories(user_text, assistant_text, source, importance)
         statements: list[dict[str, Any]] = [
@@ -374,7 +382,7 @@ class Neo4jGraphMemory:
                 """,
                 "parameters": {
                     "project_id": self.project_id,
-                    "user_id": self.user_id,
+                    "user_id": scoped_user_id,
                     "interaction_id": interaction_id,
                     "source": source,
                     "user_text": clip(user_text, 6000),
@@ -388,7 +396,7 @@ class Neo4jGraphMemory:
 
         stored = []
         for candidate in candidates:
-            mid = memory_id(candidate.kind, candidate.text)
+            mid = memory_id(candidate.kind, candidate.text, user_id=scoped_user_id)
             stored.append({"id": mid, "kind": candidate.kind, "text": candidate.text})
             statements.append({
                 "statement": """
@@ -400,6 +408,7 @@ class Neo4jGraphMemory:
                     m.text = $text,
                     m.summary = $summary,
                     m.normalized_text = $normalized_text,
+                    m.user_id = $user_id,
                     m.importance = $importance,
                     m.confidence = $confidence,
                     m.frequency = 1,
@@ -429,6 +438,7 @@ class Neo4jGraphMemory:
                     "text": candidate.text,
                     "summary": clip(candidate.text, 180),
                     "normalized_text": normalize_text(candidate.text),
+                    "user_id": scoped_user_id,
                     "importance": float(candidate.importance),
                     "confidence": float(candidate.confidence),
                     "now": now,
@@ -463,10 +473,11 @@ class Neo4jGraphMemory:
         self._commit(statements)
         return {"ok": True, "interaction_id": interaction_id, "stored": len(stored), "memories": stored}
 
-    def retrieve_context(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+    def retrieve_context(self, query: str, limit: int = 8, user_id: Optional[str] = None) -> list[dict[str, Any]]:
         if not self.configured or not query.strip():
             return []
         self.setup_schema()
+        scoped_user_id = _normalize_user_id(user_id or self.user_id)
         tokens = tokenize(query)
         entities = [e["name"].lower() for e in extract_entities(query)]
         if not tokens and not entities:
@@ -475,6 +486,7 @@ class Neo4jGraphMemory:
         result = self._commit([{
             "statement": """
             MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
+            WHERE m.user_id = $user_id
             OPTIONAL MATCH (m)-[:MENTIONS]->(e:Entity)
             WITH m, collect(e.name) AS entities, collect(toLower(e.name)) AS entity_names
             WITH m, entities,
@@ -504,6 +516,7 @@ class Neo4jGraphMemory:
             """,
             "parameters": {
                 "project_id": self.project_id,
+                "user_id": scoped_user_id,
                 "tokens": tokens,
                 "entities": entities,
                 "limit": int(max(1, min(limit, 25))),
@@ -572,6 +585,49 @@ class Neo4jGraphMemory:
             rows.append(dict(zip(columns, values)))
         return rows
 
+        def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
+            if not self.configured:
+                return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "records": [], "count": 0}
+            scoped_user_id = _normalize_user_id(user_id)
+            result = self._commit([{
+                "statement": """
+                MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
+                WHERE m.user_id = $user_id
+                RETURN m.id AS id, m.kind AS kind, m.text AS text, m.summary AS summary,
+                       m.importance AS importance, m.confidence AS confidence, m.last_seen AS last_seen
+                ORDER BY m.last_seen DESC
+                LIMIT $limit
+                """,
+                "parameters": {
+                    "project_id": self.project_id,
+                    "user_id": scoped_user_id,
+                    "limit": int(max(1, min(limit, 5000))),
+                },
+            }])
+            rows = self._records(result, 0)
+            return {"backend": "neo4j", "user_id": scoped_user_id, "records": rows, "count": len(rows)}
+
+        def delete_user_data(self, user_id: str) -> dict[str, Any]:
+            if not self.configured:
+                return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "deleted": 0}
+            scoped_user_id = _normalize_user_id(user_id)
+            result = self._commit([{
+                "statement": """
+                MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
+                WHERE m.user_id = $user_id
+                WITH collect(m) AS nodes
+                FOREACH (n IN nodes | DETACH DELETE n)
+                RETURN size(nodes) AS deleted
+                """,
+                "parameters": {
+                    "project_id": self.project_id,
+                    "user_id": scoped_user_id,
+                },
+            }])
+            rows = self._records(result, 0)
+            deleted = int(rows[0].get("deleted") or 0) if rows else 0
+            return {"backend": "neo4j", "user_id": scoped_user_id, "deleted": deleted}
+
 
 class LocalGraphMemory:
     """Durable local graph-memory fallback used when Neo4j is unavailable.
@@ -592,13 +648,17 @@ class LocalGraphMemory:
         self.user_id = user_id or DEFAULT_USER_ID
 
     def status(self) -> dict[str, Any]:
+        data = self._load()
+        memories = data.get("memories_by_user", {}).get(self.user_id)
+        if memories is None:
+            memories = data.get("memories", {})
         return {
             "configured": True,
             "available": True,
             "backend": "local_json",
             "project_id": self.project_id,
             "path": str(self.path),
-            "memory_count": len(self._load().get("memories", {})),
+            "memory_count": len(memories),
         }
 
     def remember_interaction(
@@ -607,12 +667,17 @@ class LocalGraphMemory:
         assistant_text: str = "",
         source: str = "interaction",
         metadata: Optional[dict[str, Any]] = None,
+        user_id: Optional[str] = None,
         importance: float = 0.55,
     ) -> dict[str, Any]:
         now = utc_now()
         data = self._load()
+        scoped_user_id = _normalize_user_id(user_id or self.user_id)
+        interactions_by_user = data.setdefault("interactions_by_user", {})
+        memories_by_user = data.setdefault("memories_by_user", {})
         interaction_id = f"int-{uuid.uuid4().hex}"
-        data.setdefault("interactions", []).append({
+        interactions = interactions_by_user.setdefault(scoped_user_id, [])
+        interactions.append({
             "id": interaction_id,
             "source": source,
             "user_text": clip(user_text, 6000),
@@ -621,12 +686,12 @@ class LocalGraphMemory:
             "metadata_json": metadata_to_json(metadata),
             "created_at": now,
         })
-        data["interactions"] = data["interactions"][-500:]
+        interactions_by_user[scoped_user_id] = interactions[-500:]
 
         stored = []
-        memories = data.setdefault("memories", {})
+        memories = memories_by_user.setdefault(scoped_user_id, {})
         for candidate in extract_memories(user_text, assistant_text, source, importance):
-            mid = memory_id(candidate.kind, candidate.text)
+            mid = memory_id(candidate.kind, candidate.text, user_id=scoped_user_id)
             stored.append({"id": mid, "kind": candidate.kind, "text": candidate.text})
             current = memories.get(mid)
             if current:
@@ -645,6 +710,7 @@ class LocalGraphMemory:
                     "text": candidate.text,
                     "summary": clip(candidate.text, 180),
                     "normalized_text": normalize_text(candidate.text),
+                    "user_id": scoped_user_id,
                     "importance": float(candidate.importance),
                     "confidence": float(candidate.confidence),
                     "frequency": 1,
@@ -660,18 +726,25 @@ class LocalGraphMemory:
         return {
             "ok": True,
             "backend": "local_json",
+            "user_id": scoped_user_id,
             "interaction_id": interaction_id,
             "stored": len(stored),
             "memories": stored,
         }
 
-    def retrieve_context(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+    def retrieve_context(self, query: str, limit: int = 8, user_id: Optional[str] = None) -> list[dict[str, Any]]:
         if not query.strip():
             return []
+        scoped_user_id = _normalize_user_id(user_id or self.user_id)
         tokens = tokenize(query)
         query_entities = {e["name"].lower() for e in extract_entities(query)}
+        data = self._load()
+        memories = data.get("memories_by_user", {}).get(scoped_user_id)
+        if memories is None:
+            # Backward compatibility with older single-user storage shape.
+            memories = data.get("memories", {}) if scoped_user_id == self.user_id else {}
         rows = []
-        for item in self._load().get("memories", {}).values():
+        for item in memories.values():
             text = " ".join([
                 str(item.get("text") or ""),
                 str(item.get("summary") or ""),
@@ -707,13 +780,43 @@ class LocalGraphMemory:
 
     def reinforce(self, memory_id_value: str, delta: float = 0.1) -> dict[str, Any]:
         data = self._load()
-        item = data.get("memories", {}).get(memory_id_value)
+        all_buckets = data.get("memories_by_user", {})
+        item = None
+        for bucket in all_buckets.values():
+            if memory_id_value in bucket:
+                item = bucket[memory_id_value]
+                break
+        if item is None:
+            item = data.get("memories", {}).get(memory_id_value)
         if not item:
             return {"ok": False, "reason": "memory_not_found", "memory_id": memory_id_value}
         item["importance"] = float(item.get("importance") or 0) + float(delta)
         item["last_seen"] = utc_now()
         self._save(data)
         return {"ok": True, "backend": "local_json", "memory_id": memory_id_value}
+
+    def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
+        scoped_user_id = _normalize_user_id(user_id)
+        data = self._load()
+        interactions = list(data.get("interactions_by_user", {}).get(scoped_user_id, []))[-limit:]
+        memories = list(data.get("memories_by_user", {}).get(scoped_user_id, {}).values())[-limit:]
+        return {
+            "backend": "local_json",
+            "user_id": scoped_user_id,
+            "interactions": interactions,
+            "memories": memories,
+            "count": len(interactions) + len(memories),
+        }
+
+    def delete_user_data(self, user_id: str) -> dict[str, Any]:
+        scoped_user_id = _normalize_user_id(user_id)
+        data = self._load()
+        i_count = len(data.get("interactions_by_user", {}).get(scoped_user_id, []))
+        m_count = len(data.get("memories_by_user", {}).get(scoped_user_id, {}))
+        data.setdefault("interactions_by_user", {}).pop(scoped_user_id, None)
+        data.setdefault("memories_by_user", {}).pop(scoped_user_id, None)
+        self._save(data)
+        return {"backend": "local_json", "user_id": scoped_user_id, "deleted": i_count + m_count}
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -722,6 +825,8 @@ class LocalGraphMemory:
                 "user_id": self.user_id,
                 "interactions": [],
                 "memories": {},
+                "interactions_by_user": {},
+                "memories_by_user": {},
             }
         try:
             return json.loads(self.path.read_text())
@@ -731,6 +836,8 @@ class LocalGraphMemory:
                 "user_id": self.user_id,
                 "interactions": [],
                 "memories": {},
+                "interactions_by_user": {},
+                "memories_by_user": {},
             }
 
     def _save(self, data: dict[str, Any]) -> None:
@@ -800,6 +907,28 @@ class ResilientGraphMemory:
         except Exception:
             pass
         return self.fallback.reinforce(*args, **kwargs)
+
+    def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
+        try:
+            if self.primary.status().get("available"):
+                return self.primary.export_user_data(user_id, limit=limit)
+        except Exception:
+            pass
+        return self.fallback.export_user_data(user_id, limit=limit)
+
+    def delete_user_data(self, user_id: str) -> dict[str, Any]:
+        primary_deleted = 0
+        fallback_deleted = 0
+        try:
+            if self.primary.status().get("available"):
+                primary_deleted = int(self.primary.delete_user_data(user_id).get("deleted", 0))
+        except Exception:
+            pass
+        try:
+            fallback_deleted = int(self.fallback.delete_user_data(user_id).get("deleted", 0))
+        except Exception:
+            pass
+        return {"backend": "resilient", "user_id": _normalize_user_id(user_id), "deleted": primary_deleted + fallback_deleted}
 
 
 _MEMORY: Optional[ResilientGraphMemory] = None
