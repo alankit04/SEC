@@ -21,6 +21,11 @@ API_HEADERS = {
     "X-Tenant-Id": "unit",
 }
 
+ACTION_HEADERS = {
+    **API_HEADERS,
+    "X-Action-Approval": "approved",
+}
+
 
 class FakeMarket:
     def ohlcv(self, ticker, period="1y"):
@@ -113,12 +118,25 @@ def test_portfolio_position_upsert_filters_invalid_saved_rows(monkeypatch):
     monkeypatch.setattr(raphi_server, "portfolio", fake_portfolio)
     client = TestClient(raphi_server.app)
 
-    response = client.post("/api/portfolio/positions", headers=API_HEADERS, json={"ticker": "nvda", "shares": 2})
+    response = client.post("/api/portfolio/positions", headers=ACTION_HEADERS, json={"ticker": "nvda", "shares": 2})
 
     assert response.status_code == 200
     assert fake_portfolio.positions == [
         {"ticker": "NVDA", "shares": 2.0, "entry_price": 100.0, "direction": "LONG"}
     ]
+
+
+def test_portfolio_position_requires_explicit_side_effect_approval(monkeypatch):
+    fake_market = FakeMarket()
+    fake_portfolio = FakePortfolio()
+    monkeypatch.setattr(raphi_server, "market", fake_market)
+    monkeypatch.setattr(raphi_server, "portfolio", fake_portfolio)
+    client = TestClient(raphi_server.app)
+
+    response = client.post("/api/portfolio/positions", headers=API_HEADERS, json={"ticker": "nvda", "shares": 2})
+
+    assert response.status_code == 409
+    assert "requires explicit approval" in response.json()["detail"]
 
 
 def test_memo_export_markdown_contains_sec_citations(monkeypatch):
