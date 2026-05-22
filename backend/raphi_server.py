@@ -32,6 +32,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -95,6 +96,7 @@ from user_data_store import (
     load_json as load_user_json,
     save_json as save_user_json,
 )
+from paths import COMPANY_TICKERS_FILE
 
 # ── Initialise Sentry before anything else ───────────────────────────
 init_sentry()
@@ -110,6 +112,8 @@ TICKER_ALLOWLIST_EXTRAS = {
     "SPY", "QQQ", "GLD", "TLT", "IEF", "HYG", "LQD", "BIL",
 }
 _TICKER_KNOWN_CACHE: dict[str, bool] = {}
+_COMPANY_NAME_LOOKUP: dict[str, str] | None = None
+_COMPANY_NAME_LOOKUP_LOCK = threading.Lock()
 
 TICKER_IDENTITY_OVERRIDES = {
     "ASST": {
@@ -452,6 +456,91 @@ def _is_known_ticker(ticker: str) -> bool:
     return known
 
 
+_COMPANY_SUFFIX_TOKENS = {
+    "inc", "incorporated", "corp", "corporation", "co", "company", "companies",
+    "ltd", "limited", "llc", "plc", "ag", "sa", "nv", "spa", "holdings", "holding",
+    "group", "the",
+}
+
+
+def _normalize_company_text(text: str) -> str:
+    normalized = _re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+    return _re.sub(r"\s+", " ", normalized)
+
+
+def _simplify_company_name(name: str) -> str:
+    tokens = _normalize_company_text(name).split()
+    while tokens and tokens[-1] in _COMPANY_SUFFIX_TOKENS:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def _build_company_name_lookup() -> dict[str, str]:
+    global _COMPANY_NAME_LOOKUP
+
+    if _COMPANY_NAME_LOOKUP is not None:
+        return _COMPANY_NAME_LOOKUP
+
+    with _COMPANY_NAME_LOOKUP_LOCK:
+        if _COMPANY_NAME_LOOKUP is not None:
+            return _COMPANY_NAME_LOOKUP
+
+        by_name: dict[str, set[str]] = {}
+        try:
+            source_file = COMPANY_TICKERS_FILE if COMPANY_TICKERS_FILE.exists() else (BASE / "company_tickers.json")
+            if source_file.exists():
+                with open(source_file, encoding="utf-8") as f:
+                    raw = json.load(f)
+                rows = raw.values() if isinstance(raw, dict) else raw
+                for row in rows:
+                    ticker = str(row.get("ticker", "")).strip().upper()
+                    title = str(row.get("title", "")).strip()
+                    if not ticker or not title or not _is_known_ticker(ticker):
+                        continue
+
+                    candidates = {
+                        _normalize_company_text(title),
+                        _simplify_company_name(title),
+                    }
+                    for candidate in candidates:
+                        if len(candidate) < 3:
+                            continue
+                        by_name.setdefault(candidate, set()).add(ticker)
+        except Exception:
+            by_name = {}
+
+        for ticker, identity in TICKER_IDENTITY_OVERRIDES.items():
+            for raw_name in (identity.get("current_name", ""), identity.get("former_name", "")):
+                for candidate in (_normalize_company_text(raw_name), _simplify_company_name(raw_name)):
+                    if len(candidate) >= 3:
+                        by_name.setdefault(candidate, set()).add(ticker)
+
+        resolved: dict[str, str] = {}
+        for name, tickers in by_name.items():
+            if len(tickers) == 1:
+                resolved[name] = next(iter(tickers))
+
+        _COMPANY_NAME_LOOKUP = resolved
+        return _COMPANY_NAME_LOOKUP
+
+
+def _extract_ticker_from_company_text(text: str) -> str | None:
+    lookup = _build_company_name_lookup()
+    normalized_text = _normalize_company_text(text)
+    if not normalized_text:
+        return None
+
+    words = normalized_text.split()
+    max_ngram = min(8, len(words))
+    for width in range(max_ngram, 0, -1):
+        for start in range(0, len(words) - width + 1):
+            phrase = " ".join(words[start : start + width])
+            ticker = lookup.get(phrase)
+            if ticker and _is_known_ticker(ticker):
+                return ticker
+    return None
+
+
 def _sanitize_ticker_list(values: list[str]) -> list[str]:
     cleaned: list[str] = []
     seen: set[str] = set()
@@ -696,6 +785,29 @@ def _evidence_fail_closed_enabled() -> bool:
 
 def _governance_block_mode_enabled() -> bool:
     return _env_bool("RAPHI_GOVERNANCE_BLOCK_MODE", False)
+
+
+def _require_side_effect_approval_enabled() -> bool:
+    return _env_bool("RAPHI_REQUIRE_SIDE_EFFECT_APPROVAL", True)
+
+
+def _has_side_effect_approval(request: Request) -> bool:
+    approved = str(request.headers.get("X-Action-Approval", "")).strip().lower()
+    return approved in {"approved", "true", "1", "yes"}
+
+
+def _enforce_side_effect_approval(request: Request, action: str) -> None:
+    if not _require_side_effect_approval_enabled():
+        return
+    if _has_side_effect_approval(request):
+        return
+    raise HTTPException(
+        409,
+        (
+            f"Action '{action}' requires explicit approval. "
+            "Resubmit with header X-Action-Approval: approved"
+        ),
+    )
 
 
 def _should_buffer_output() -> bool:
@@ -957,6 +1069,50 @@ def _load_run_record(run_id: str) -> dict:
         raise HTTPException(500, f"Failed to read run record: {exc}")
 
 
+def _summarize_run_record(record: dict) -> dict:
+    eval_result = record.get("eval_result") or {}
+    review = record.get("review") if isinstance(record.get("review"), dict) else {}
+    strict_gate = review.get("strict_quality_gate") if isinstance(review.get("strict_quality_gate"), dict) else {}
+    return {
+        "run_id": record.get("run_id"),
+        "timestamp": record.get("timestamp"),
+        "thread_id": record.get("thread_id"),
+        "ticker": record.get("ticker"),
+        "user_id": record.get("user_id"),
+        "latency_ms": record.get("latency_ms"),
+        "attempts": review.get("attempts"),
+        "eval": {
+            "overall_score": eval_result.get("overall_score"),
+            "passed": eval_result.get("passed"),
+        },
+        "review": {
+            "status": review.get("status"),
+            "compliance_status": (review.get("compliance") or {}).get("status") if isinstance(review.get("compliance"), dict) else None,
+            "strict_quality_gate": strict_gate,
+        },
+        "quality": {
+            "citation_count": len(record.get("citations") or []),
+            "tool_count": len(record.get("observed_tools") or []),
+        },
+    }
+
+
+def _summarize_tool_trace(trace: list[dict]) -> list[dict]:
+    summarized: list[dict] = []
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        summarized.append(
+            {
+                "phase": item.get("phase"),
+                "id": item.get("id"),
+                "label": item.get("label"),
+                "tool": item.get("tool"),
+            }
+        )
+    return summarized
+
+
 @api.get("/runs/{run_id}")
 @limiter.limit("60/minute")
 def run_record_detail(run_id: str, request: Request):
@@ -969,7 +1125,12 @@ def run_record_detail(run_id: str, request: Request):
     caller = f"{tenant_id}:{raw_user_id}"
     if role != "admin" and record_user and record_user != caller:
         raise HTTPException(403, "Run record does not belong to caller")
-    return record
+    include_raw = str(request.query_params.get("include_raw", "")).strip().lower() in {"1", "true", "yes"}
+    if include_raw:
+        if role != "admin":
+            raise HTTPException(403, "Only admin can access raw run records")
+        return record
+    return _summarize_run_record(record)
 
 
 @api.get("/runs/{run_id}/tool-trace")
@@ -984,11 +1145,15 @@ def run_record_tool_trace(run_id: str, request: Request):
     record_user = str(record.get("user_id") or "")
     if role != "admin" and record_user and record_user != caller:
         raise HTTPException(403, "Run record does not belong to caller")
+    include_raw = str(request.query_params.get("include_raw", "")).strip().lower() in {"1", "true", "yes"}
+    if include_raw and role != "admin":
+        raise HTTPException(403, "Only admin can access raw tool trace")
     trace = record.get("tool_trace") or []
+    payload_trace = trace if include_raw else _summarize_tool_trace(trace)
     return {
         "run_id": run_id,
-        "count": len(trace),
-        "tool_trace": trace,
+        "count": len(payload_trace),
+        "tool_trace": payload_trace,
     }
 
 
@@ -1101,6 +1266,7 @@ def gnn_status(request: Request):
 @api.post("/gnn/train")
 @limiter.limit("10/minute")
 def gnn_train(request: Request, bg: BackgroundTasks, body: Optional[GNNTrainRequest] = None):
+    _enforce_side_effect_approval(request, "gnn_train")
     train_request = body or GNNTrainRequest()
     universe = _gnn_universe(requested=train_request.tickers or None)
 
@@ -1263,6 +1429,7 @@ def citations_status(request: Request):
 @api.post("/citations/index")
 @limiter.limit("20/minute")
 def citations_index_route(body: CitationIndexRequest, request: Request):
+    _enforce_side_effect_approval(request, "citations_index")
     ticker = _ticker_symbol(body.ticker) if body.ticker else ""
     text = body.text
     title = body.title
@@ -1288,6 +1455,7 @@ def citations_index_route(body: CitationIndexRequest, request: Request):
 @api.post("/citations/sec/{ticker}/index")
 @limiter.limit("20/minute")
 def citations_index_sec_route(ticker: str, request: Request, limit_filings: int = 8):
+    _enforce_side_effect_approval(request, "citations_sec_index")
     ticker = _ticker_symbol(ticker)
     return citations.ingest_sec_ticker(sec, ticker, limit_filings=min(max(int(limit_filings), 1), 20))
 
@@ -1468,6 +1636,7 @@ class Positions(BaseModel):
 @api.put("/portfolio")
 @limiter.limit("60/minute")
 def update_portfolio(body: Positions, request: Request):
+    _enforce_side_effect_approval(request, "portfolio_update")
     _, _, user_scope = _request_identity_scope(request)
     _portfolio_update_positions_for_scope(body.positions, user_scope)
     return {"ok": True}
@@ -1484,6 +1653,7 @@ class PortfolioPositionRequest(BaseModel):
 @api.post("/portfolio/positions")
 @limiter.limit("30/minute")
 def add_portfolio_position(body: PortfolioPositionRequest, request: Request):
+    _enforce_side_effect_approval(request, "portfolio_add_position")
     _, _, user_scope = _request_identity_scope(request)
     ticker = _ticker_symbol(body.ticker)
     direction = body.direction.upper()
@@ -1711,6 +1881,7 @@ def models_optimization(request: Request):
 @api.post("/models/rl/update")
 @limiter.limit("20/minute")
 def models_rl_update(request: Request):
+    _enforce_side_effect_approval(request, "models_rl_update")
     return optimize_from_conviction_ledger(CONVICTIONS_FILE, RESOLUTIONS_FILE)
 
 
@@ -1762,6 +1933,7 @@ class ConvictionRequest(BaseModel):
 @api.post("/convictions")
 @limiter.limit("60/minute")
 def post_conviction(body: ConvictionRequest, request: Request):
+    _enforce_side_effect_approval(request, "post_conviction")
     if not _re.match(r"^[A-Z]{1,5}$", body.ticker.upper()):
         raise HTTPException(422, "Invalid ticker")
     conviction_id = write_conviction(
@@ -1817,6 +1989,7 @@ def memory_status(request: Request):
 @api.post("/memory/remember")
 @limiter.limit("30/minute")
 def memory_remember(body: MemoryRememberRequest, request: Request):
+    _enforce_side_effect_approval(request, "memory_remember")
     _, _, user_scope = _request_identity_scope(request)
     try:
         return memory.remember_interaction(
@@ -1984,8 +2157,18 @@ CHAT_NON_TICKER_TERMS = {
 
 
 def _extract_ticker_from_text(text: str) -> str | None:
-    for token in _re.findall(r"\b[A-Z]{2,5}\b", str(text or "").upper()):
-        if token not in CHAT_NON_TICKER_TERMS and TICKER_RE.match(token):
+    raw_text = str(text or "")
+    for match in _re.finditer(r"\$?[A-Za-z]{2,5}", raw_text):
+        raw_token = match.group(0)
+        token = raw_token[1:] if raw_token.startswith("$") else raw_token
+
+        if not raw_token.startswith("$") and token != token.upper():
+            continue
+
+        token = token.upper()
+        if token in CHAT_NON_TICKER_TERMS or not TICKER_RE.match(token):
+            continue
+        if _is_known_ticker(token):
             return token
     return None
 
@@ -1994,18 +2177,26 @@ def _resolve_chat_ticker(req: "ChatRequest") -> str:
     explicit = _extract_ticker_from_text(req.message)
     if explicit:
         return explicit
+    by_company = _extract_ticker_from_company_text(req.message)
+    if by_company:
+        return by_company
     user_history = [item for item in req.history[-10:] if item.get("role") == "user"]
     for item in reversed(user_history):
-        found = _extract_ticker_from_text(item.get("content", ""))
+        content = item.get("content", "")
+        found = _extract_ticker_from_text(content) or _extract_ticker_from_company_text(content)
         if found:
             return found
     for item in reversed(req.history[-6:]):
         if item.get("role") == "assistant":
             continue
-        found = _extract_ticker_from_text(item.get("content", ""))
+        content = item.get("content", "")
+        found = _extract_ticker_from_text(content) or _extract_ticker_from_company_text(content)
         if found:
             return found
-    return _ticker_symbol(req.ticker)
+    try:
+        return _ticker_symbol(req.ticker)
+    except HTTPException:
+        return "NVDA"
 
 
 def _is_identity_or_capability_query(message: str) -> bool:
@@ -2105,6 +2296,13 @@ def _source_checks(text: str, local_context: dict | None = None) -> dict:
     signal = local_context.get("ml_signal", {}) or {}
     body = str(text or "")
     web_ctx = local_context.get("web_citations", {}) or {}
+    domains = [
+        (m.group(1) or "").lower().removeprefix("www.")
+        for m in _re.finditer(r"https?://([^/\s)\]]+)", body, _re.I)
+    ]
+    unique_domains = sorted({d for d in domains if d})
+    non_core_domains = [d for d in unique_domains if d not in {"sec.gov", "finance.yahoo.com"}]
+    source_diversity_required = bool(local_context.get("source_diversity_required", False))
     return {
         "sec_citation_available": bool(sec_ctx.get("recent_filings") or sec_ctx.get("financial_citations")),
         "sec_citation_used": bool(_re.search(r"https://www\.sec\.gov/Archives|accession\s+[0-9-]{10,}", body, _re.I)),
@@ -2114,6 +2312,10 @@ def _source_checks(text: str, local_context: dict | None = None) -> dict:
         "news_source_used": bool(_re.search(r"https?://", body)) if news else True,
         "web_citations_available": bool(web_ctx.get("results")),
         "web_citations_used": any((item.get("url") or "") in body for item in web_ctx.get("results", [])[:5]),
+        "source_diversity_required": source_diversity_required,
+        "source_diversity_met": bool(non_core_domains),
+        "link_domains": unique_domains,
+        "non_core_domains": non_core_domains,
         "ml_checked": bool(signal),
         "gnn_checked": bool(gnn_ctx.get("status") or gnn_ctx.get("signal")),
         "risk_framing_used": bool(_re.search(r"\b(risk|uncertain|uncertainty|downside|stop|invalidation|may|could)\b", body, _re.I)),
@@ -2130,11 +2332,21 @@ def _reflection_label(checks: dict) -> str:
         missing.append("news source")
     if checks.get("web_citations_available") and not checks.get("web_citations_used"):
         missing.append("web citation link")
+    if checks.get("source_diversity_required") and not checks.get("source_diversity_met"):
+        missing.append("independent non-SEC/non-Yahoo source")
     if not checks.get("risk_framing_used"):
         missing.append("risk framing")
     if missing:
         return "Reflection found gaps: " + ", ".join(missing)
     return "Reflection passed: sources, memory, tools, and risk framing checked"
+
+
+def _requires_source_diversity(message: str) -> bool:
+    return bool(_re.search(
+        r"\b(valuation|historical|peer|compare|cross[- ]?check|audit|verification|verify|risk|hedg|iv|implied volatility|z-?score|stretched|recommendation)\b",
+        str(message or ""),
+        _re.I,
+    ))
 
 
 _STEP_TOOL_MAP = {
@@ -2173,6 +2385,8 @@ def _apply_evidence_enforcement(text: str, checks: dict, required: bool) -> tupl
             violations.append("Web citations were available but not used")
         if checks.get("market_source_available") and not checks.get("market_source_used"):
             violations.append("Market source attribution missing")
+        if checks.get("source_diversity_required") and not checks.get("source_diversity_met"):
+            violations.append("Independent non-SEC/non-Yahoo citation missing")
 
     if not violations:
         return text, {"required": required, "status": "pass", "violations": []}
@@ -2201,6 +2415,53 @@ def _apply_evidence_enforcement(text: str, checks: dict, required: bool) -> tupl
     }
 
 
+def _strict_quality_gate(
+    *,
+    message: str,
+    candidate_response: str,
+    checks: dict,
+    eval_result: dict,
+    require_evidence: bool,
+) -> dict:
+    metrics = eval_result.get("metrics") or {}
+    citation_metric = metrics.get("citation_precision") or {}
+    unsupported_metric = metrics.get("unsupported_claim_rate") or {}
+
+    violations: list[str] = []
+    citation_required = bool(require_evidence or checks.get("web_citations_available") or checks.get("sec_citation_available"))
+    if citation_required and (not bool(citation_metric.get("passed", True))):
+        violations.append("Citation precision gate failed")
+    if citation_required and (not bool(unsupported_metric.get("passed", True))):
+        violations.append("Unsupported claim gate failed")
+
+    response = str(candidate_response or "")
+    lower_response = response.lower()
+    lower_message = str(message or "").lower()
+    mentions_ml = bool(_re.search(r"\b(ml|model signal|signal model|xgboost|lstm)\b", lower_response + "\n" + lower_message))
+    mentions_gnn = bool(_re.search(r"\b(gnn|graph signal|graph model|peer influence|neighbor)\b", lower_response + "\n" + lower_message))
+    mentions_directional_view = bool(_re.search(r"\b(bullish|bearish|buy|sell|overweight|underweight|long|short)\b", lower_response))
+
+    conflict_required = mentions_ml and mentions_gnn and mentions_directional_view
+    if conflict_required:
+        has_conflict_reasoning = bool(
+            _re.search(
+                r"\b(conflict|disagree|contradict|mixed signal|offset|lower(?:ed)? conviction|"
+                r"position sizing|size (?:down|smaller)|uncertain|uncertainty|risk)\b",
+                lower_response,
+            )
+        )
+        if not has_conflict_reasoning:
+            violations.append("ML/GNN conflict reasoning gate failed")
+
+    return {
+        "status": "pass" if not violations else "blocked",
+        "passed": not violations,
+        "citation_required": citation_required,
+        "conflict_required": conflict_required,
+        "violations": violations,
+    }
+
+
 def _collect_local_agent_context(
     *,
     message: str,
@@ -2209,19 +2470,22 @@ def _collect_local_agent_context(
     detail: dict,
     news: list,
     registration: dict | None = None,
+    force_tool_families: set[str] | None = None,
+    force_refresh_citations: bool = False,
 ) -> dict:
     """Collect real specialist-agent evidence for the browser fallback path."""
+    force_tool_families = set(force_tool_families or set())
     lower = message.lower()
     want_sec_financials = bool(_re.search(
         r"\b(sec|filing|10-k|10-q|fundamental|financial|memo|thesis|recommend)\b",
         lower,
         _re.I,
-    ))
+    )) or "sec" in force_tool_families
     want_gnn = bool(_re.search(
         r"\b(gnn|graph|peer|neighbor|signal|memo|thesis|recommend|risk|explain|investable|investment|analyze|analysis|performance)\b",
         lower,
         _re.I,
-    ))
+    )) or "gnn" in force_tool_families or "ml" in force_tool_families
     want_agentic = want_sec_financials or want_gnn
 
     ctx: dict = {
@@ -2325,7 +2589,7 @@ def _collect_local_agent_context(
         r"\b(source|sources|citation|citations|cite|perplexity|web|news|latest|recent|analyst|transcript|article|why|how|evidence)\b",
         lower,
         _re.I,
-    ))
+    )) or "citation" in force_tool_families
     if want_web_citations:
         query = f"{ticker} {message} investment analysis source"
         try:
@@ -2765,6 +3029,7 @@ Presentation rules for the RAPHI web console:
 - For investment memos, use exactly these sections: Recommendation, Key Evidence, GNN / Peer Influence, Risks, Trade Plan.
 - In Key Evidence, include a Sources / Citations subsection with direct links.
 - For non-SEC narrative claims, use the @web-citation-search results and cite them as [1], [2], etc.
+- For valuation/peer/risk claims, include at least one independent citation beyond SEC and Yahoo when available.
 - Do not say "SEC checked" unless you include at least one SEC accession/date/URL or explicitly say unavailable.
 - Put the recommendation, confidence, and target/stop in the first 2 lines.
 - Do not use ASCII diagrams, pipe-delimited relationship chains, raw graph art, or dense one-paragraph blocks.
@@ -2867,11 +3132,11 @@ Presentation rules for the RAPHI web console:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     async def generate():
-        collected: list[str] = []
-        used_agentic = False
-        agentic_error = ""
-        local_context: dict | None = None
-        stream_tokens_immediately = not _should_buffer_output()
+        max_retries = min(max(int(os.environ.get("RAPHI_CHAT_MAX_RETRIES", "0")), 0), 4)
+        max_attempts = 1 + max_retries
+        stream_tokens_immediately = (not _should_buffer_output()) and max_attempts == 1
+        require_evidence = bool(_re.search(r"\b(cite|citation|source|evidence|sec|filing|news|prove|support)\b", req.message, _re.I))
+        require_source_diversity = _requires_source_diversity(req.message)
 
         yield _sse("step", json.dumps({
             "id": "run_start",
@@ -2879,153 +3144,311 @@ Presentation rules for the RAPHI web console:
             "label": "Run started",
             "thread_id": req.thread_id,
             "ticker": ticker,
+            "max_attempts": max_attempts,
         }))
 
+        all_tool_trace: list[dict] = []
+        all_observed_tools: list[str] = []
+        attempt_failures: list[dict] = []
+        retry_missing_tools: set[str] = set()
+        retry_require_citations = require_source_diversity
+
+        final_response = ""
+        final_checks: dict = {}
+        final_evidence_enforcement: dict = {"required": require_evidence, "status": "not_applicable", "violations": []}
+        final_post_report = None
+        final_eval_result: dict = {"passed": False, "overall_score": 0.0, "metrics": {}}
+        final_citation_objects = []
+        final_used_agentic = False
+        final_strict_gate: dict = {"status": "pass", "passed": True, "violations": []}
+        selected_attempt = 1
+
+        expected_tool_ids = [step["id"] for step in execution_plan if step["id"] in _STEP_TOOL_MAP]
+
+        for step in execution_plan:
+            all_tool_trace.append({"phase": "plan", "id": step["id"], "label": step["label"]})
         yield _sse("step", json.dumps({
             "id": "plan",
             "label": "Reasoning plan prepared: goal -> tools -> memory -> synthesis -> reflection",
             "plan": execution_plan,
         }))
         for step in execution_plan:
-            tool_trace.append({"phase": "plan", "id": step["id"], "label": step["label"]})
+            yield _sse("step", json.dumps({"id": f"plan_{step['id']}", "label": f"Plan: {step['label']}"}))
+
+        for attempt in range(1, max_attempts + 1):
+            selected_attempt = attempt
+            attempt_collected: list[str] = []
+            attempt_observed_tools: list[str] = []
+            attempt_tool_trace: list[dict] = []
+            local_context: dict | None = None
+            agentic_error = ""
+            used_agentic_attempt = False
+
             yield _sse("step", json.dumps({
-                "id": f"plan_{step['id']}",
-                "label": f"Plan: {step['label']}",
+                "id": "attempt_start",
+                "label": f"Attempt {attempt}/{max_attempts} started",
+                "attempt": attempt,
+                "max_attempts": max_attempts,
             }))
 
-        if req.agentic:
-            yield _sse("step", json.dumps({"id": "orchestrator", "label": "Routing browser chat through A2A agent swarm"}))
-            # Compact prompt — MCP tools fetch precise detail; pre-loaded context is headline only
-            _news_lines = "\n".join(f"- {n['title']} ({n.get('url','unavailable')})" for n in news[: (1 if compact_mode else 2)])
-            agent_prompt = (
-                f"{req.message}\n\n"
-                f"Ticker: {ticker} ({identity.get('current_name', ticker)})\n"
-                f"Price: ${detail.get('price','?')} | P/E: {detail.get('pe_ratio','?')} | Signal: {sig_text or 'not computed'}\n"
-                f"Portfolio: {_compact_text(_fmt_portfolio(snap), 180 if compact_mode else 520)}\n"
-                f"Headlines:\n{_news_lines}\n"
-                f"Use MCP tools for precise data. Reply in clean Markdown with concise bullets, citation links, and explicit risk framing."
-            )
-            try:
-                agent_stream = _agent.stream(
-                    agent_prompt,
-                    task_id=f"web:{req.thread_id}:{ticker}",
-                    user_role=user_role,
-                    compact=compact_mode,
-                )
-            except TypeError:
-                # Backward compatibility for test doubles or legacy agent implementations.
-                agent_stream = _agent.stream(agent_prompt, task_id=f"web:{req.thread_id}:{ticker}")
-
-            async for event in agent_stream:
-                if event["event"] == "error":
-                    agentic_error = event["data"]
-                    break
-                if event["event"] == "step":
-                    payload = event["data"]
-                    payload_obj = {}
-                    if isinstance(payload, str):
-                        try:
-                            payload_obj = json.loads(payload)
-                        except Exception:
-                            payload_obj = {"label": payload}
-                    elif isinstance(payload, dict):
-                        payload_obj = payload
-                    tool_name = _extract_tool_name_from_step_payload(payload_obj)
-                    if tool_name:
-                        observed_tools.append(tool_name)
-                    tool_trace.append({
-                        "phase": "agentic",
-                        "id": payload_obj.get("id", "step"),
-                        "label": payload_obj.get("label", str(payload)[:200]),
-                        "tool": tool_name,
-                        "raw": _compact_text(json.dumps(payload_obj, sort_keys=True), 1200),
-                    })
-                    yield _sse("step", event["data"])
-                elif event["event"] == "token":
-                    collected.append(event["data"])
-                    if stream_tokens_immediately:
-                        yield _sse("token", event["data"])
-            used_agentic = bool(collected)
-
-        if not used_agentic:
-            if agentic_error:
+            if attempt > 1:
                 yield _sse("step", json.dumps({
-                    "id": "agentic_fallback",
-                    "label": f"A2A SDK returned no text; running local multi-agent fallback ({agentic_error[:120]})",
+                    "id": "replan",
+                    "label": "Replan triggered after failed quality checks",
+                    "attempt": attempt,
+                    "missing_tools": sorted(retry_missing_tools),
+                    "force_citations": retry_require_citations,
+                    "previous_failures": attempt_failures[-1] if attempt_failures else {},
                 }))
-            yield _sse("step", json.dumps({"id": "local_swarm", "label": "Local specialist agents collecting real evidence"}))
-            local_context = await asyncio.to_thread(
-                _collect_local_agent_context,
-                message=req.message,
-                ticker=ticker,
-                snap=snap,
-                detail=detail,
-                news=news,
-                registration=registration,
-            )
-            local_steps = [
-                ("market",       f"@market-analyst loaded live price, fundamentals, and news for {ticker}"),
-                ("sec",          "@sec-researcher loaded local SEC filing history and XBRL when requested"),
-                ("signals",      "@ml-signals checked cached XGBoost/LSTM signal output"),
-                ("gnn",          "@gnn-influence checked graph status and neighbor influence"),
-                ("web",          "@web-citation-search fetched web citation results when requested"),
-                ("portfolio",    "@portfolio-risk computed exposure, P&L, VaR, and Sharpe"),
-                ("synthesize",   "@memo-synthesizer combining specialist outputs with guardrails"),
-            ]
-            for step_id, label in local_steps:
-                mapped = _STEP_TOOL_MAP.get(step_id)
-                if mapped:
-                    observed_tools.append(mapped)
-                tool_trace.append({"phase": "local_swarm", "id": step_id, "label": label, "tool": mapped})
-                if local_context and step_id in local_context:
-                    tool_trace[-1]["raw"] = _compact_text(json.dumps(local_context.get(step_id, {}), sort_keys=True, default=str), 1200)
-                yield _sse("step", json.dumps({"id": step_id, "label": label}))
-                await asyncio.sleep(0.03)
-            fallback_system = f"{system}\n\n{_format_local_agent_context(local_context)}"
-            async for chunk in _stream_direct_anthropic_chat(
-                req=req,
-                system=fallback_system,
-                messages=messages,
-                api_key_anthropic=api_key_anthropic,
-                context=context,
-            ):
-                if chunk.startswith("event: token"):
-                    data = chunk.split("data: ", 1)[1].rstrip("\n")
-                    try:
-                        data = json.loads(data)
-                    except Exception:
-                        pass
-                    collected.append(data)
-                    if stream_tokens_immediately:
+
+            use_agentic_attempt = req.agentic and attempt == 1
+            if use_agentic_attempt:
+                yield _sse("step", json.dumps({
+                    "id": "orchestrator",
+                    "label": "Routing browser chat through A2A agent swarm",
+                    "attempt": attempt,
+                }))
+                _news_lines = "\n".join(
+                    f"- {n['title']} ({n.get('url','unavailable')})"
+                    for n in news[: (1 if compact_mode else 2)]
+                )
+                agent_prompt = (
+                    f"{req.message}\n\n"
+                    f"Ticker: {ticker} ({identity.get('current_name', ticker)})\n"
+                    f"Price: ${detail.get('price','?')} | P/E: {detail.get('pe_ratio','?')} | Signal: {sig_text or 'not computed'}\n"
+                    f"Portfolio: {_compact_text(_fmt_portfolio(snap), 180 if compact_mode else 520)}\n"
+                    f"Headlines:\n{_news_lines}\n"
+                    f"Use MCP tools for precise data. Reply in clean Markdown with concise bullets, citation links, and explicit risk framing."
+                )
+                try:
+                    agent_stream = _agent.stream(
+                        agent_prompt,
+                        task_id=f"web:{req.thread_id}:{ticker}",
+                        user_role=user_role,
+                        compact=compact_mode,
+                    )
+                except TypeError:
+                    agent_stream = _agent.stream(agent_prompt, task_id=f"web:{req.thread_id}:{ticker}")
+
+                async for event in agent_stream:
+                    if event["event"] == "error":
+                        agentic_error = event["data"]
+                        break
+                    if event["event"] == "step":
+                        payload = event["data"]
+                        payload_obj = {}
+                        if isinstance(payload, str):
+                            try:
+                                payload_obj = json.loads(payload)
+                            except Exception:
+                                payload_obj = {"label": payload}
+                        elif isinstance(payload, dict):
+                            payload_obj = payload
+                        tool_name = _extract_tool_name_from_step_payload(payload_obj)
+                        if tool_name:
+                            attempt_observed_tools.append(tool_name)
+                        attempt_tool_trace.append({
+                            "phase": f"attempt_{attempt}_agentic",
+                            "id": payload_obj.get("id", "step"),
+                            "label": payload_obj.get("label", str(payload)[:200]),
+                            "tool": tool_name,
+                            "raw": _compact_text(json.dumps(payload_obj, sort_keys=True), 1200),
+                        })
+                        yield _sse("step", event["data"])
+                    elif event["event"] == "token":
+                        attempt_collected.append(event["data"])
+                        if stream_tokens_immediately:
+                            yield _sse("token", event["data"])
+                used_agentic_attempt = bool(attempt_collected)
+
+            if not used_agentic_attempt:
+                if agentic_error:
+                    yield _sse("step", json.dumps({
+                        "id": "agentic_fallback",
+                        "label": f"A2A SDK returned no text; running local multi-agent fallback ({agentic_error[:120]})",
+                        "attempt": attempt,
+                    }))
+                force_tools = set(retry_missing_tools)
+                if retry_require_citations:
+                    force_tools.add("citation")
+                yield _sse("step", json.dumps({
+                    "id": "local_swarm",
+                    "label": "Local specialist agents collecting real evidence",
+                    "attempt": attempt,
+                    "forced_tools": sorted(force_tools),
+                }))
+                local_context = await asyncio.to_thread(
+                    _collect_local_agent_context,
+                    message=req.message,
+                    ticker=ticker,
+                    snap=snap,
+                    detail=detail,
+                    news=news,
+                    registration=registration,
+                    force_tool_families=force_tools,
+                    force_refresh_citations=retry_require_citations,
+                )
+                if local_context is None:
+                    local_context = {}
+                local_context["source_diversity_required"] = require_source_diversity
+                local_steps = [
+                    ("market", f"@market-analyst loaded live price, fundamentals, and news for {ticker}"),
+                    ("sec", "@sec-researcher loaded local SEC filing history and XBRL when requested"),
+                    ("signals", "@ml-signals checked cached XGBoost/LSTM signal output"),
+                    ("gnn", "@gnn-influence checked graph status and neighbor influence"),
+                    ("web", "@web-citation-search fetched web citation results when requested"),
+                    ("portfolio", "@portfolio-risk computed exposure, P&L, VaR, and Sharpe"),
+                    ("synthesize", "@memo-synthesizer combining specialist outputs with guardrails"),
+                ]
+                for step_id, label in local_steps:
+                    mapped = _STEP_TOOL_MAP.get(step_id)
+                    if mapped:
+                        attempt_observed_tools.append(mapped)
+                    attempt_tool_trace.append({
+                        "phase": f"attempt_{attempt}_local_swarm",
+                        "id": step_id,
+                        "label": label,
+                        "tool": mapped,
+                    })
+                    yield _sse("step", json.dumps({"id": step_id, "label": label, "attempt": attempt}))
+                    await asyncio.sleep(0.03)
+
+                retry_note = ""
+                if force_tools:
+                    retry_note = "\n\nRetry policy: prioritize missing tool families -> " + ", ".join(sorted(force_tools))
+                fallback_system = f"{system}{retry_note}\n\n{_format_local_agent_context(local_context)}"
+                async for chunk in _stream_direct_anthropic_chat(
+                    req=req,
+                    system=fallback_system,
+                    messages=messages,
+                    api_key_anthropic=api_key_anthropic,
+                    context=context,
+                ):
+                    if chunk.startswith("event: token"):
+                        data = chunk.split("data: ", 1)[1].rstrip("\n")
+                        try:
+                            data = json.loads(data)
+                        except Exception:
+                            pass
+                        attempt_collected.append(data)
+                        if stream_tokens_immediately:
+                            yield chunk
+                    else:
                         yield chunk
-                else:
-                    yield chunk
+                anthropic_breaker.record_success()
 
-            anthropic_breaker.record_success()
+            candidate_response = "".join(attempt_collected)
+            checks_context = dict(local_context or {})
+            checks_context["source_diversity_required"] = require_source_diversity
+            checks = _source_checks(candidate_response, checks_context)
+            reflection = _reflection_label(checks)
+            yield _sse("step", json.dumps({
+                "id": "reflection",
+                "label": reflection,
+                "checks": checks,
+                "attempt": attempt,
+            }))
+            if reflection.startswith("Reflection found gaps"):
+                reflection_note = (
+                    "\n\n### Reflection Check\n"
+                    "- Some requested evidence was not fully cited in the generated text above.\n"
+                    "- Use the Sources / Citations section or rerun with a narrower filing/news request for stricter provenance."
+                )
+                candidate_response += reflection_note
+                if stream_tokens_immediately:
+                    yield _sse("token", reflection_note)
 
-        final_response = "".join(collected)
-        checks = _source_checks(final_response, local_context)
-        yield _sse("step", json.dumps({
-            "id": "reflection",
-            "label": _reflection_label(checks),
-            "checks": checks,
-        }))
-        if _reflection_label(checks).startswith("Reflection found gaps"):
-            reflection_note = (
-                "\n\n### Reflection Check\n"
-                "- Some requested evidence was not fully cited in the generated text above.\n"
-                "- Use the Sources / Citations section or rerun with a narrower filing/news request for stricter provenance."
+            candidate_response, evidence_enforcement = _apply_evidence_enforcement(candidate_response, checks, require_evidence)
+            if evidence_enforcement.get("status") == "downgraded" and stream_tokens_immediately:
+                suffix = "\n\n### Evidence Enforcement\n- Response downgraded due to missing required evidence links."
+                if suffix in candidate_response:
+                    yield _sse("token", suffix)
+
+            post_guarded, post_report = validate_and_repair_response(candidate_response, context)
+            if post_guarded != candidate_response:
+                delta = post_guarded[len(candidate_response):] if post_guarded.startswith(candidate_response) else "\n\n### Guardrail Update\n- Response adjusted after final validation."
+                candidate_response = post_guarded
+                if delta and stream_tokens_immediately:
+                    yield _sse("token", delta)
+
+            citation_objects = extract_citations(candidate_response)
+            unique_attempt_tools = sorted({tool for tool in attempt_observed_tools if tool})
+            eval_case = EvalCase(
+                id=f"{run_id}-attempt-{attempt}",
+                prompt=req.message,
+                response=candidate_response,
+                expected_tools=expected_tool_ids,
+                observed_tools=unique_attempt_tools,
+                citations=citation_objects,
+                allowed_tickers=set(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+                ticker=ticker,
+                require_memo_schema=_requires_memo_schema(req.message),
+                require_citations=require_evidence,
             )
-            final_response += reflection_note
-            if stream_tokens_immediately:
-                yield _sse("token", reflection_note)
+            eval_result = evaluate_case(eval_case).to_dict()
+            metrics = eval_result.get("metrics", {})
+            tool_details = ((metrics.get("tool_routing_accuracy") or {}).get("details") or {})
+            missing_tools = [str(t) for t in (tool_details.get("missing_tools") or []) if str(t)]
+            citation_passed = bool((metrics.get("citation_precision") or {}).get("passed", True))
+            retry_require_citations = retry_require_citations or (not citation_passed) or evidence_enforcement.get("status") in {"downgraded", "blocked"}
+            retry_missing_tools = set(missing_tools)
 
-        require_evidence = bool(_re.search(r"\b(cite|citation|source|evidence|sec|filing|news|prove|support)\b", req.message, _re.I))
-        final_response, evidence_enforcement = _apply_evidence_enforcement(final_response, checks, require_evidence)
-        if evidence_enforcement.get("status") == "downgraded" and stream_tokens_immediately:
-            suffix = "\n\n### Evidence Enforcement\n- Response downgraded due to missing required evidence links."
-            if suffix in final_response:
-                yield _sse("token", suffix)
+            bad_reflection = reflection.startswith("Reflection found gaps")
+            bad_evidence = evidence_enforcement.get("status") in {"downgraded", "blocked"}
+            eval_passed = bool(eval_result.get("passed"))
+
+            strict_gate = _strict_quality_gate(
+                message=req.message,
+                candidate_response=candidate_response,
+                checks=checks,
+                eval_result=eval_result,
+                require_evidence=require_evidence,
+            )
+            strict_failed = not strict_gate.get("passed", True)
+            should_retry = attempt < max_attempts and (not eval_passed or bad_reflection or bad_evidence or strict_failed)
+
+            all_tool_trace.extend(attempt_tool_trace)
+            all_observed_tools.extend(unique_attempt_tools)
+
+            final_response = candidate_response
+            final_checks = checks
+            final_evidence_enforcement = evidence_enforcement
+            final_post_report = post_report
+            final_eval_result = eval_result
+            final_citation_objects = citation_objects
+            final_used_agentic = used_agentic_attempt
+            final_strict_gate = strict_gate
+
+            if should_retry:
+                failure = {
+                    "attempt": attempt,
+                    "eval_passed": eval_passed,
+                    "overall_score": eval_result.get("overall_score"),
+                    "missing_tools": sorted(retry_missing_tools),
+                    "evidence_status": evidence_enforcement.get("status"),
+                    "reflection": reflection,
+                    "strict_quality_gate": strict_gate,
+                }
+                attempt_failures.append(failure)
+                yield _sse("step", json.dumps({
+                    "id": "retry_decision",
+                    "label": "Quality gate failed; retrying with replanned tool strategy",
+                    "attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "failure": failure,
+                }))
+                continue
+
+            break
+
+        if (
+            not final_strict_gate.get("passed", True)
+            and not str(final_response).startswith("Policy block: evidence requirements")
+        ):
+            final_response = (
+                "Policy block: strict quality requirements were not satisfied. "
+                + "; ".join(final_strict_gate.get("violations", []))
+            )
 
         _maybe_write_conviction(
             ticker=ticker,
@@ -3037,39 +3460,18 @@ Presentation rules for the RAPHI web console:
                 user_text=req.message,
                 assistant_text=final_response,
                 source="chat",
-                metadata={"ticker": ticker, "agentic": used_agentic, "thread_id": req.thread_id},
+                metadata={
+                    "ticker": ticker,
+                    "agentic": final_used_agentic,
+                    "thread_id": req.thread_id,
+                    "attempts": selected_attempt,
+                    "retries": max(0, selected_attempt - 1),
+                },
                 user_id=user_scope,
                 importance=0.64,
             )
         except Exception:
             pass
-
-        post_guarded, post_report = validate_and_repair_response(final_response, context)
-        if post_guarded != final_response:
-            delta = post_guarded[len(final_response):] if post_guarded.startswith(final_response) else "\n\n### Guardrail Update\n- Response adjusted after final validation."
-            final_response = post_guarded
-            if delta and stream_tokens_immediately:
-                yield _sse("token", delta)
-
-        citation_objects = extract_citations(final_response)
-        citation_records = [c.__dict__ for c in citation_objects]
-        unique_observed_tools = sorted({tool for tool in observed_tools if tool})
-        expected_tool_ids = [step["id"] for step in execution_plan if step["id"] in _STEP_TOOL_MAP]
-        latency_ms = int((time.perf_counter() - run_started) * 1000)
-
-        eval_case = EvalCase(
-            id=run_id,
-            prompt=req.message,
-            response=final_response,
-            expected_tools=expected_tool_ids,
-            observed_tools=unique_observed_tools,
-            citations=citation_objects,
-            allowed_tickers=set(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
-            ticker=ticker,
-            require_memo_schema=_requires_memo_schema(req.message),
-            require_citations=require_evidence,
-        )
-        eval_result = evaluate_case(eval_case).to_dict()
 
         governance = assess_output(final_response, output_kind="chat")
         review_state = {"status": "not_required"}
@@ -3110,22 +3512,26 @@ Presentation rules for the RAPHI web console:
             for chunk in _chunk_text(final_response):
                 yield _sse("token", chunk)
 
+        unique_observed_tools = sorted({tool for tool in all_observed_tools if tool})
+        citation_records = [c.__dict__ for c in final_citation_objects]
+        latency_ms = int((time.perf_counter() - run_started) * 1000)
+
         run_record = build_run_record(
             run_id=run_id,
             prompt=req.message,
             final_response=final_response,
             expected_tools=expected_tool_ids,
             observed_tools=unique_observed_tools,
-            tool_trace=tool_trace,
+            tool_trace=all_tool_trace,
             citations=citation_records,
             ticker=ticker,
             allowed_tickers=list(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
             memo_schema=_requires_memo_schema(req.message),
-            guardrail_repairs=post_report.repairs,
-            guardrail_warnings=post_report.warnings,
-            guardrail_missing_sections=post_report.missing_sections,
-            guardrail_unknown_tickers=post_report.unknown_tickers,
-            evidence_enforcement=evidence_enforcement,
+            guardrail_repairs=(final_post_report.repairs if final_post_report else []),
+            guardrail_warnings=(final_post_report.warnings if final_post_report else []),
+            guardrail_missing_sections=(final_post_report.missing_sections if final_post_report else []),
+            guardrail_unknown_tickers=(final_post_report.unknown_tickers if final_post_report else []),
+            evidence_enforcement=final_evidence_enforcement,
             thread_id=req.thread_id,
             session_id=getattr(request, "session_id", None),
             user_id=f"{tenant_id}:{raw_user_id}",
@@ -3133,14 +3539,20 @@ Presentation rules for the RAPHI web console:
             model_path=_select_chat_model(req.message, mode=req.response_mode),
             provider_path="anthropic/claude-agent-sdk",
             latency_ms=latency_ms,
-            eval_result=eval_result,
+            eval_result=final_eval_result,
             governance=governance,
-            review={**review_state, "compliance": compliance_report},
+            review={
+                **review_state,
+                "compliance": compliance_report,
+                "attempts": selected_attempt,
+                "retry_failures": attempt_failures,
+                "strict_quality_gate": final_strict_gate,
+            },
             quality={
-                "unsupported_claim_ratio": 0.0 if checks.get("sec_citation_used") else 0.1,
+                "unsupported_claim_ratio": 0.0 if final_checks.get("sec_citation_used") else 0.1,
                 "citation_precision": 1.0 if citation_records else 0.5,
-                "trace_completeness": 1.0 if tool_trace else 0.0,
-                "routing_accuracy": 1.0 if used_agentic else 0.9,
+                "trace_completeness": 1.0 if all_tool_trace else 0.0,
+                "routing_accuracy": 1.0 if final_used_agentic else 0.9,
             },
         )
         log_eval_run(run_record)
@@ -3151,8 +3563,11 @@ Presentation rules for the RAPHI web console:
             "latency_ms": latency_ms,
             "observed_tools": unique_observed_tools,
             "citation_count": len(citation_records),
-            "eval_score": eval_result.get("overall_score"),
-            "eval_passed": eval_result.get("passed"),
+            "eval_score": final_eval_result.get("overall_score"),
+            "eval_passed": final_eval_result.get("passed"),
+            "attempts_used": selected_attempt,
+            "max_attempts": max_attempts,
+            "retry_failures": attempt_failures,
         }))
         yield _sse("done", "")
 
@@ -3548,6 +3963,7 @@ def get_compliance(request: Request):
 @api.put("/compliance")
 @limiter.limit("30/minute")
 def update_compliance(body: ComplianceBody, request: Request):
+    _enforce_side_effect_approval(request, "update_compliance")
     _, _, user_scope = _request_identity_scope(request)
     payload = {
         "regulated_advice_mode": bool(body.regulated_advice_mode),
@@ -3646,6 +4062,7 @@ def export_user_data(request: Request):
 @api.delete("/user-data")
 @limiter.limit("10/minute")
 def delete_user_data(body: DeleteUserDataBody, request: Request):
+    _enforce_side_effect_approval(request, "delete_user_data")
     role = _request_role(request)
     if role not in {"analyst", "admin"}:
         raise HTTPException(403, "Role is not permitted to delete user data")
@@ -3701,6 +4118,7 @@ class SettingsBody(BaseModel):
 @api.put("/settings")
 @limiter.limit("60/minute")
 def update_settings(body: SettingsBody, request: Request):
+    _enforce_side_effect_approval(request, "update_settings")
     _, _, user_scope = _request_identity_scope(request)
     s = _load_settings_for_scope(user_scope)
     if body.watchlist:
