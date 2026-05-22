@@ -2348,25 +2348,39 @@ function identityHeaders() {
 
 // ── LAYER 6: apiFetch (wraps fetch with auth + CB + abort) ────────────
 async function apiFetch(path, opts = {}) {
-  const key = localStorage.getItem('raphi_api_key') || '';
-  const headers = { 'X-API-Key': key, ...identityHeaders(), ...(opts.headers || {}) };
+  const headers = authHeaders(opts.headers || {});
+  const method = String(opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && !headers['X-Action-Approval']) {
+    headers['X-Action-Approval'] = 'approved';
+  }
   const signal = opts.signal || (_pageController ? _pageController.signal : undefined);
   try {
     const r = await fetch(API_BASE + path, { ...opts, headers, signal });
     if (r.status === 401) {
+      // Auth failures are not connectivity failures; keep circuit breaker closed.
+      CB.state = 'CLOSED';
+      CB.failures = 0;
+      CB.stepIdx = 0;
+      CB._hideBanner();
       showApiKeyBanner();
-      throw new Error('401 Unauthorized');
+      const err = new Error('401 Unauthorized');
+      err.isAuth = true;
+      throw err;
     }
     if (r.status === 429) {
       console.warn('Rate limited by backend:', path);
-      throw new Error('429 Rate Limited');
+      const err = new Error('429 Rate Limited');
+      err.isRateLimited = true;
+      throw err;
     }
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     CB.recordSuccess();
     return r;
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    CB.recordFailure();
+    if (!e.isAuth && !e.isRateLimited) {
+      CB.recordFailure();
+    }
     throw e;
   }
 }
@@ -2492,16 +2506,59 @@ function updateRefreshInfo() {
 // AUTH FLOW
 // ============================================================
 function showApiKeyBanner() {
-  CB._showBanner('API key rejected — verify your key in Settings');
+  CB._showBanner('Session expired or invalid — sign in again.');
+}
+
+function getSessionToken() {
+  return localStorage.getItem('raphi_session_token') || '';
+}
+
+function authHeaders(extra = {}) {
+  const token = getSessionToken();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...identityHeaders(),
+    ...extra,
+  };
+}
+
+const WORK_EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+
+function normalizeEmail(raw) {
+  return String(raw || '').trim().toLowerCase();
+}
+
+function isCompleteWorkEmail(email) {
+  return WORK_EMAIL_RE.test(String(email || ''));
+}
+
+function guardEmailInput(el) {
+  if (!el) return;
+  el.addEventListener('input', () => {
+    const normalized = normalizeEmail(el.value);
+    if (el.value !== normalized) {
+      el.value = normalized;
+    }
+  });
 }
 
 async function doLogin() {
-  const email = document.getElementById('loginEmail')?.value?.trim() || '';
+  const loginInput = document.getElementById('loginEmail');
+  const email = normalizeEmail(loginInput?.value);
   const btn   = document.getElementById('loginBtn');
   const errEl = document.getElementById('loginError');
 
+  if (loginInput) {
+    loginInput.value = email;
+  }
+
   if (!email) {
     showLoginError('Enter your work email to continue.');
+    return;
+  }
+
+  if (!isCompleteWorkEmail(email)) {
+    showLoginError('Enter a complete lowercase work email (example: analyst@fund.com).');
     return;
   }
 
@@ -2510,7 +2567,21 @@ async function doLogin() {
   errEl.style.display = 'none';
 
   try {
-    localStorage.removeItem('raphi_api_key');
+    const tenant = (localStorage.getItem('raphi_tenant') || 'local').trim().toLowerCase() || 'local';
+    const loginRes = await fetch(`${API_BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, tenant }),
+    });
+    if (!loginRes.ok) {
+      throw new Error(`HTTP ${loginRes.status}`);
+    }
+    const loginPayload = await loginRes.json();
+    if (!loginPayload?.token) {
+      throw new Error('Missing session token');
+    }
+
+    localStorage.setItem('raphi_session_token', loginPayload.token);
     localStorage.setItem('raphi_user', email);
     const parts = email.split('@')[0].split(/[._-]/);
     const initials = (parts[0][0] + (parts[1]?.[0] || parts[0][1] || '')).toUpperCase();
@@ -2543,12 +2614,25 @@ function focusLandingConnect() {
 }
 
 function connectFromLanding() {
-  const email = document.getElementById('landingEmail')?.value.trim() || '';
+  const landingInput = document.getElementById('landingEmail');
+  const email = normalizeEmail(landingInput?.value);
   const error = document.getElementById('landingConnectError');
+
+  if (landingInput) {
+    landingInput.value = email;
+  }
 
   if (!email) {
     if (error) {
       error.textContent = 'Enter your work email to continue.';
+      error.style.display = 'block';
+    }
+    return;
+  }
+
+  if (!isCompleteWorkEmail(email)) {
+    if (error) {
+      error.textContent = 'Enter a complete lowercase work email (example: analyst@fund.com).';
       error.style.display = 'block';
     }
     return;
@@ -2570,6 +2654,7 @@ function completeOnboarding() {
 }
 
 function logout() {
+  localStorage.removeItem('raphi_session_token');
   localStorage.removeItem('raphi_api_key');
   localStorage.removeItem('raphi_user');
   localStorage.removeItem('raphi_initials');
@@ -2681,13 +2766,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Email input guards: force lowercase and require valid format at submit.
+  guardEmailInput(document.getElementById('landingEmail'));
+  guardEmailInput(document.getElementById('loginEmail'));
+
   setTabs('#page-stock', () => loadStockPage(getPageSignal()));
   setTabs('#page-signals', () => loadSignalsPage(getPageSignal()));
   setTabs('#page-shap', () => loadShapPage(getPageSignal()));
 
   // Init auth state
-  const key = localStorage.getItem('raphi_api_key');
-  if (key) {
+  const session = getSessionToken();
+  if (session) {
     // Already logged in
     launchApp();
   } else {
@@ -2811,7 +2900,7 @@ function updateMarketMetrics(d) {
     if (!row) return;
     const priceEl = row.querySelector('.watchlist-price');
     const chgEl   = row.querySelector('.watchlist-chg');
-    if (priceEl) priceEl.textContent = s.price != null ? fmt$(s.price) : '—';
+    if (priceEl) priceEl.textContent = s.price != null ? fmt$(s.price, 2) : '—';
     if (chgEl && s.change_pct != null) {
       const up = s.change_pct >= 0;
       chgEl.textContent = (up ? '+' : '') + s.change_pct.toFixed(1) + '%';
@@ -2856,7 +2945,7 @@ async function loadWatchlistPrices(signal) {
       if (!row) return;
       const priceEl = row.querySelector('.watchlist-price');
       const chgEl   = row.querySelector('.watchlist-chg');
-      if (priceEl && d.price != null) priceEl.textContent = fmt$(d.price);
+      if (priceEl && d.price != null) priceEl.textContent = fmt$(d.price, 2);
       const pct = d.pct ?? d.change_pct;
       if (chgEl && pct != null) {
         const up = pct >= 0;
@@ -3087,7 +3176,7 @@ function updateDashboardSignals(d) {
     const row = document.querySelector(`.watchlist-item[data-ticker="${s.ticker}"]`);
     if (!row || !s.current_price) return;
     const priceEl = row.querySelector('.watchlist-price');
-    if (priceEl && priceEl.textContent === '—') priceEl.textContent = fmt$(s.current_price);
+    if (priceEl && priceEl.textContent === '—') priceEl.textContent = fmt$(s.current_price, 2);
   });
 }
 
@@ -3543,7 +3632,6 @@ function generateMemo() {
   if (memoEventSource) memoEventSource.close();
   memoOutput.innerHTML = `<div class="small" style="color:var(--text-muted);">Generating memo for ${ticker}…</div>`;
 
-  const key = localStorage.getItem('raphi_api_key') || '';
   // SSE must use EventSource - but EventSource doesn't support custom headers
   // Use fetch + ReadableStream instead
   fetchSSEMemo(ticker, memoOutput, btn);
@@ -3551,10 +3639,9 @@ function generateMemo() {
 
 async function fetchSSEMemo(ticker, outputEl, btn) {
   try {
-    const key = localStorage.getItem('raphi_api_key') || '';
     const r = await fetch(`${API_BASE}/api/memo/${ticker}`, {
       method: 'POST',
-      headers: { 'X-API-Key': key, ...identityHeaders() }
+      headers: authHeaders()
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
@@ -3769,7 +3856,10 @@ async function loadSettingsPage(signal) {
     }
 
     const raphi_key = document.querySelector('#page-settings .raphi-key-display, #raphiKeyDisplay');
-    if (raphi_key) raphi_key.textContent = (localStorage.getItem('raphi_api_key') || '').replace(/./g, (c, i) => i < 8 ? c : '•');
+    if (raphi_key) {
+      const token = getSessionToken();
+      raphi_key.textContent = token ? `session:${token.slice(0, 10)}...` : 'No session token';
+    }
   } catch(e) { if (e.name !== 'AbortError') console.warn('Settings:', e.message); }
 }
 
@@ -3949,38 +4039,47 @@ function renderProfessionalResponse(raw) {
 }
 
 function renderTracePanel(state) {
+  const debugTrace = localStorage.getItem('raphi_debug_trace') === '1';
   const run = state.runId ? `<div><strong>Run:</strong> ${escapeHtml(state.runId)}</div>` : '';
   const tools = state.tools.size
-    ? `<div><strong>Tools:</strong> ${Array.from(state.tools).map(escapeHtml).join(', ')}</div>`
-    : `<div><strong>Tools:</strong> none observed yet</div>`;
-  const plan = state.plan.length
-    ? `<ul style="margin:6px 0 0 18px;">${state.plan.slice(0, 8).map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>`
-    : '<div>Plan pending…</div>';
-  const guardrails = state.guardrails.length
-    ? `<div><strong>Guardrails:</strong> ${escapeHtml(state.guardrails.join('; '))}</div>`
-    : '';
+    ? `<div><strong>Tool Families:</strong> ${Array.from(state.tools).map(escapeHtml).join(', ')}</div>`
+    : `<div><strong>Tool Families:</strong> collecting...</div>`;
   const evalLine = state.evalScore != null
     ? `<div><strong>Eval:</strong> ${state.evalPassed ? 'pass' : 'fail'} (${state.evalScore})${state.latencyMs != null ? ` · ${state.latencyMs}ms` : ''}</div>`
     : '';
+  const progress = state.progress.length
+    ? `<div><strong>Status:</strong> ${escapeHtml(state.progress[state.progress.length - 1])}</div>`
+    : '<div><strong>Status:</strong> analysis in progress...</div>';
   return `
     <div class="card" style="margin-bottom:10px;padding:10px 12px;background:var(--bg-secondary);border:1px solid var(--border);">
-      <div style="font-weight:700;font-size:12px;margin-bottom:6px;color:var(--text-secondary);">RUN TRACE</div>
+      <div style="font-weight:700;font-size:12px;margin-bottom:6px;color:var(--text-secondary);">RUN STATUS</div>
       ${run}
+      ${progress}
       ${tools}
-      ${guardrails}
       ${evalLine}
-      ${state.runId ? `<div style="margin-top:6px;"><button class="btn-outline btn-sm" onclick="toggleRunTraceDetail('${escapeHtml(state.runId)}')">Toggle Raw Run Detail</button></div>` : ''}
+      ${debugTrace && state.runId ? `<div style="margin-top:6px;"><button class="btn-outline btn-sm" onclick="toggleRunTraceDetail('${escapeHtml(state.runId)}')">Toggle Raw Run Detail</button></div>` : ''}
       ${state.detailHtml || ''}
-      <div style="margin-top:6px;"><strong>Plan:</strong>${plan}</div>
     </div>
   `;
 }
 
 async function loadRunTraceDetail(runId) {
+  const debugTrace = localStorage.getItem('raphi_debug_trace') === '1';
   try {
-    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`);
+    const path = debugTrace
+      ? `/api/runs/${encodeURIComponent(runId)}?include_raw=1`
+      : `/api/runs/${encodeURIComponent(runId)}`;
+    const r = await apiFetch(path);
     return await r.json();
   } catch (e) {
+    if (debugTrace) {
+      try {
+        const fallback = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`);
+        return await fallback.json();
+      } catch (_) {
+        // fall through to sanitized error
+      }
+    }
     return { error: e.message || 'Unable to load run detail' };
   }
 }
@@ -4002,6 +4101,33 @@ window.toggleRunTraceDetail = async function(runId) {
   target.dataset.showRunDetail = runId;
   target.innerHTML = `${renderTracePanel(state)}${renderProfessionalResponse(window.__raphiTraceText || '')}`;
 };
+
+function normalizeTicker(raw) {
+  const t = String(raw || '').trim().toUpperCase();
+  return /^[A-Z]{1,5}(?:\.[A-Z])?$/.test(t) ? t : '';
+}
+
+function extractTickerFromMessage(text) {
+  const tokens = String(text || '').toUpperCase().match(/\b[A-Z]{1,5}(?:\.[A-Z])?\b/g) || [];
+  const nonTickerTerms = new Set([
+    'A', 'AN', 'AND', 'AS', 'AT', 'BE', 'BUY', 'CALL', 'DO', 'FOR', 'GIVE', 'GO', 'HOLD',
+    'I', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'NOT', 'OF', 'ON', 'OR', 'SELL', 'SO',
+    'THE', 'TO', 'WE', 'WITH', 'YOU', 'YOUR'
+  ]);
+  for (const token of tokens) {
+    if (!nonTickerTerms.has(token)) return token;
+  }
+  return '';
+}
+
+function resolveSafeChatTicker(message, tickerInputValue, currentTickerValue) {
+  return (
+    extractTickerFromMessage(message)
+    || normalizeTicker(tickerInputValue)
+    || normalizeTicker(currentTickerValue)
+    || 'NVDA'
+  );
+}
 
 async function sendChat() {
   if (chatLocked) return;
@@ -4039,14 +4165,16 @@ async function sendChat() {
   activeChatAbortController = controller;
 
   try {
-    const key = localStorage.getItem('raphi_api_key') || '';
     const tickerInput = document.querySelector('#page-ask .ticker-input, #chatTickerInput');
-    const ticker = (tickerInput?.value?.trim() || currentChatTicker).toUpperCase();
+    const ticker = resolveSafeChatTicker(val, tickerInput?.value, currentChatTicker);
     currentChatTicker = ticker;
+    if (tickerInput && normalizeTicker(tickerInput.value) !== ticker) {
+      tickerInput.value = ticker;
+    }
 
     const r = await fetch(`${API_BASE}/api/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': key, ...identityHeaders() },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ message: val, history: historyForRequest, ticker, thread_id: requestThreadId, agentic: true }),
       signal: controller.signal,
     });
@@ -4062,9 +4190,8 @@ async function sendChat() {
     const responseEl = aiMsg.querySelector('.response-body');
     const traceState = {
       runId: null,
-      plan: [],
+      progress: [],
       tools: new Set(),
-      guardrails: [],
       evalScore: null,
       evalPassed: null,
       latencyMs: null,
@@ -4112,14 +4239,11 @@ async function sendChat() {
               try { stepPayload = JSON.parse(stepPayload); } catch(e) { stepPayload = { label: stepPayload }; }
             }
             if (stepPayload?.run_id) traceState.runId = stepPayload.run_id;
-            if (stepPayload?.id?.startsWith?.('plan_') && stepPayload?.label) {
-              traceState.plan.push(stepPayload.label);
-            }
-            if (stepPayload?.id === 'guardrails') {
-              const parts = [];
-              if (Array.isArray(stepPayload.repairs) && stepPayload.repairs.length) parts.push(`repairs: ${stepPayload.repairs.length}`);
-              if (Array.isArray(stepPayload.warnings) && stepPayload.warnings.length) parts.push(`warnings: ${stepPayload.warnings.length}`);
-              if (parts.length) traceState.guardrails.push(parts.join(', '));
+            if (typeof stepPayload?.label === 'string') {
+              const id = String(stepPayload.id || '');
+              if (id === 'run_start' || id === 'attempt_start' || id === 'retry_decision' || id === 'run_summary' || id === 'human_review') {
+                traceState.progress.push(stepPayload.label);
+              }
             }
             if (Array.isArray(stepPayload?.observed_tools)) {
               stepPayload.observed_tools.forEach(t => traceState.tools.add(String(t)));
@@ -4464,8 +4588,8 @@ function newResearchNote(template = 'Blank research note') {
 
 function revealRaphiKey() {
   const el = document.getElementById('settingsRaphiKeyMasked');
-  const key = localStorage.getItem('raphi_api_key') || '';
-  if (el) el.textContent = key ? `${key.slice(0, 8)}...${key.slice(-6)}` : 'No key stored in browser';
+  const token = getSessionToken();
+  if (el) el.textContent = token ? `session:${token.slice(0, 12)}...${token.slice(-8)}` : 'No session stored in browser';
 }
 
 function rotateRaphiKey() {
