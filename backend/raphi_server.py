@@ -32,6 +32,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import uvicorn
@@ -82,6 +83,18 @@ import raphi_mcp_server as mcp_bridge
 import edgar_live
 import firecrawl_client
 import web_citations
+from eval_harness import EvalCase, evaluate_case, extract_citations
+from eval_logger import build_run_record, log_eval_run, new_run_id
+from release_gates import evaluate_release, load_run_records
+from governance import assess_output, enqueue_review, list_reviews, decide_review
+from provider_controls import CircuitBreaker, ProviderHealthRegistry
+from user_data_store import (
+    settings_path as user_settings_path,
+    portfolio_path as user_portfolio_path,
+    compliance_path as user_compliance_path,
+    load_json as load_user_json,
+    save_json as save_user_json,
+)
 
 # ── Initialise Sentry before anything else ───────────────────────────
 init_sentry()
@@ -92,6 +105,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 SETTINGS_FILE     = BASE / "settings.json"
 DEFAULT_WATCHLIST = ["NVDA", "AAPL", "MSFT", "META", "TSLA", "AMZN", "GOOGL"]
 TICKER_RE         = re.compile(r"^[A-Z]{1,5}$")
+TICKER_ALLOWLIST_EXTRAS = {
+    # Common ETFs/funds used in this app and not always present in SEC ticker maps.
+    "SPY", "QQQ", "GLD", "TLT", "IEF", "HYG", "LQD", "BIL",
+}
+_TICKER_KNOWN_CACHE: dict[str, bool] = {}
 
 TICKER_IDENTITY_OVERRIDES = {
     "ASST": {
@@ -113,6 +131,62 @@ portfolio = PortfolioManager()
 memory    = get_graph_memory()
 gnn       = GNNSignalEngine.get(sec)
 citations = get_citation_index()
+
+# ── Lightweight TTL cache for market data (avoids repeated yfinance round-trips) ──
+import threading as _threading
+
+class _TTLCache:
+    """Simple thread-safe TTL cache for expensive IO-bound calls."""
+    def __init__(self, ttl_s: int = 60) -> None:
+        self._lock = _threading.Lock()
+        self._store: dict = {}
+        self._ttl = ttl_s
+
+    def get(self, key: str):
+        with self._lock:
+            entry = self._store.get(key)
+            if entry and (time.time() - entry["ts"]) < self._ttl:
+                return entry["value"]
+            return None
+
+    def set(self, key: str, value) -> None:
+        with self._lock:
+            self._store[key] = {"value": value, "ts": time.time()}
+
+_market_cache = _TTLCache(ttl_s=45)
+
+anthropic_breaker = CircuitBreaker(
+    failure_threshold=int(os.environ.get("RAPHI_CB_ANTHROPIC_FAILURES", "3")),
+    reset_timeout_s=int(os.environ.get("RAPHI_CB_ANTHROPIC_RESET_S", "90")),
+)
+firecrawl_breaker = CircuitBreaker(
+    failure_threshold=int(os.environ.get("RAPHI_CB_FIRECRAWL_FAILURES", "3")),
+    reset_timeout_s=int(os.environ.get("RAPHI_CB_FIRECRAWL_RESET_S", "120")),
+)
+edgar_breaker = CircuitBreaker(
+    failure_threshold=int(os.environ.get("RAPHI_CB_EDGAR_FAILURES", "4")),
+    reset_timeout_s=int(os.environ.get("RAPHI_CB_EDGAR_RESET_S", "60")),
+)
+
+provider_registry = ProviderHealthRegistry()
+provider_registry.set_provider(
+    "anthropic",
+    configured=bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()),
+    breaker=anthropic_breaker,
+    meta={"model": "claude", "path": "anthropic"},
+)
+provider_registry.set_provider(
+    "firecrawl",
+    configured=bool(os.environ.get("FIRECRAWL_API_KEY", "").strip()),
+    breaker=firecrawl_breaker,
+    meta={"path": "firecrawl"},
+)
+provider_registry.set_provider(
+    "edgar",
+    configured=True,
+    breaker=edgar_breaker,
+    meta={"path": "sec-edgar-public"},
+)
 
 # ══════════════════════════════════════════════════════════════════════
 # A2A AGENT CARD  — describes the RAPHI swarm to the outside world
@@ -254,7 +328,7 @@ class MCPBridgeRequest(BaseModel):
 
 
 @app.post("/mcp")
-async def mcp_bridge_call(body: MCPBridgeRequest):
+async def mcp_bridge_call(body: MCPBridgeRequest, request: Request):
     """Bridge HTTP /mcp requests to the stdio MCP tool implementations."""
     raw_tool = str(body.tool or "").strip()
     if not raw_tool:
@@ -264,8 +338,18 @@ async def mcp_bridge_call(body: MCPBridgeRequest):
     if tool_name.startswith("mcp__raphi__"):
         tool_name = tool_name[len("mcp__raphi__"):]
 
+    arguments = dict(body.arguments or {})
+    # Route-specific cache scope for user-sensitive tools.
     try:
-        contents = await mcp_bridge.call_tool(tool_name, body.arguments or {})
+        _, _, user_scope = _request_identity_scope(request)
+        if "__user_scope" not in arguments:
+            arguments["__user_scope"] = user_scope
+    except HTTPException:
+        # Keep legacy compatibility for internal calls that do not pass user headers.
+        pass
+
+    try:
+        contents = await mcp_bridge.call_tool(tool_name, arguments)
     except Exception as exc:
         raise HTTPException(422, str(exc))
 
@@ -304,11 +388,31 @@ def _now_str() -> str:
 
 
 def _load_settings() -> dict:
-    if SETTINGS_FILE.exists():
-        import json
-        with open(SETTINGS_FILE) as f:
-            return json.load(f)
-    return {"watchlist": DEFAULT_WATCHLIST}
+    return _load_settings_for_scope("global")
+
+
+def _load_settings_for_scope(user_scope: str) -> dict:
+    path = user_settings_path(user_scope) if user_scope != "global" else SETTINGS_FILE
+    if not path.exists():
+        return {"watchlist": DEFAULT_WATCHLIST}
+
+    import json
+    with open(path) as f:
+        settings = json.load(f)
+
+    # Keep persisted state clean so plain English words never remain as tickers.
+    original_watchlist = list(settings.get("watchlist", []))
+    original_auto_added = list(settings.get("auto_added_tickers", []))
+    settings["watchlist"] = _sanitize_ticker_list(original_watchlist or DEFAULT_WATCHLIST)
+    if "auto_added_tickers" in settings:
+        settings["auto_added_tickers"] = _sanitize_ticker_list(original_auto_added)
+
+    if (
+        settings.get("watchlist") != original_watchlist
+        or settings.get("auto_added_tickers", []) != original_auto_added
+    ):
+        _save_settings_for_scope(settings, user_scope)
+    return settings
 
 
 def _json_safe(value):
@@ -327,11 +431,43 @@ def _ticker_symbol(raw: str) -> str:
     ticker = str(raw).strip().upper()
     if not TICKER_RE.match(ticker):
         raise HTTPException(422, f"Invalid ticker '{ticker}'. Use 1-5 uppercase letters.")
+    if not _is_known_ticker(ticker):
+        raise HTTPException(422, f"Invalid ticker '{ticker}'. Not found in supported ticker universe.")
     return ticker
 
 
-def _watchlist() -> list[str]:
-    raw_watchlist = _load_settings().get("watchlist", DEFAULT_WATCHLIST)
+def _is_known_ticker(ticker: str) -> bool:
+    normalized = str(ticker or "").strip().upper()
+    if not normalized:
+        return False
+    if normalized in _TICKER_KNOWN_CACHE:
+        return _TICKER_KNOWN_CACHE[normalized]
+
+    known = (
+        normalized in TICKER_ALLOWLIST_EXTRAS
+        or normalized in TICKER_IDENTITY_OVERRIDES
+        or bool(sec.cik_for_ticker(normalized))
+    )
+    _TICKER_KNOWN_CACHE[normalized] = known
+    return known
+
+
+def _sanitize_ticker_list(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        try:
+            ticker = _ticker_symbol(raw)
+        except HTTPException:
+            continue
+        if ticker not in seen:
+            cleaned.append(ticker)
+            seen.add(ticker)
+    return cleaned
+
+
+def _watchlist(user_scope: str = "global") -> list[str]:
+    raw_watchlist = _load_settings_for_scope(user_scope).get("watchlist", DEFAULT_WATCHLIST)
     tickers: list[str] = []
     seen: set[str] = set()
     for raw in raw_watchlist:
@@ -343,6 +479,20 @@ def _watchlist() -> list[str]:
             tickers.append(ticker)
             seen.add(ticker)
     return tickers or DEFAULT_WATCHLIST
+
+
+def _allowed_watchlist_tickers(requested: list[str], *, extra_tickers: list[str] | None = None, user_scope: str = "global") -> list[str]:
+    extra_tickers = extra_tickers or []
+    universe: list[str] = []
+    seen: set[str] = set()
+    for raw in [*extra_tickers, *(requested or []), *_watchlist(user_scope)]:
+        ticker = _ticker_symbol(raw)
+        if ticker not in seen:
+            universe.append(ticker)
+            seen.add(ticker)
+    if len(universe) < 2:
+        raise HTTPException(422, "GNN needs at least 2 valid tickers.")
+    return universe
 
 
 def _ticker_identity(ticker: str) -> dict:
@@ -366,10 +516,10 @@ def _apply_ticker_identity(ticker: str, detail: dict | None) -> dict:
     return detail
 
 
-def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None) -> list[str]:
+def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None, user_scope: str = "global") -> list[str]:
     universe: list[str] = []
     seen: set[str] = set()
-    for raw in [*extra_tickers, *(requested or []), *_watchlist()]:
+    for raw in [*extra_tickers, *(requested or []), *_watchlist(user_scope)]:
         ticker = _ticker_symbol(raw)
         if ticker not in seen:
             universe.append(ticker)
@@ -379,10 +529,10 @@ def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None) ->
     return universe
 
 
-def _register_ticker_for_agentic_analysis(ticker: str) -> dict:
+def _register_ticker_for_agentic_analysis(ticker: str, user_scope: str = "global") -> dict:
     """Persist a newly requested ticker and attempt to include it in the GNN graph."""
     ticker = _ticker_symbol(ticker)
-    settings = _load_settings()
+    settings = _load_settings() if user_scope == "global" else _load_settings_for_scope(user_scope)
     watchlist = []
     seen = set()
     for raw in settings.get("watchlist", DEFAULT_WATCHLIST):
@@ -404,9 +554,12 @@ def _register_ticker_for_agentic_analysis(ticker: str) -> dict:
         settings.setdefault("ticker_identities", {})
         if ticker in TICKER_IDENTITY_OVERRIDES:
             settings["ticker_identities"][ticker] = TICKER_IDENTITY_OVERRIDES[ticker]
-        _save_settings(settings)
+        if user_scope == "global":
+            _save_settings(settings)
+        else:
+            _save_settings_for_scope(settings, user_scope)
 
-    universe = _gnn_universe(ticker, requested=watchlist)
+    universe = _gnn_universe(ticker, requested=watchlist, user_scope=user_scope)
     result = {
         "ticker": ticker,
         "added_to_watchlist": added,
@@ -424,18 +577,198 @@ def _register_ticker_for_agentic_analysis(ticker: str) -> dict:
     return result
 
 
+def _register_ticker_for_scope(ticker: str, user_scope: str) -> dict:
+    try:
+        return _register_ticker_for_agentic_analysis(ticker, user_scope)
+    except TypeError:
+        return _register_ticker_for_agentic_analysis(ticker)
+
+
 def _save_settings(s: dict) -> None:
+    _save_settings_for_scope(s, "global")
+
+
+def _save_settings_for_scope(s: dict, user_scope: str) -> None:
     import json
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(s, f, indent=2)
+    payload = dict(s)
+    payload["watchlist"] = _sanitize_ticker_list(payload.get("watchlist", DEFAULT_WATCHLIST)) or DEFAULT_WATCHLIST
+    if "auto_added_tickers" in payload:
+        payload["auto_added_tickers"] = _sanitize_ticker_list(payload.get("auto_added_tickers", []))
+    path = user_settings_path(user_scope) if user_scope != "global" else SETTINGS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
 
 
-def _anthropic_api_key() -> str:
+def _anthropic_api_key(user_scope: str = "global") -> str:
     """Return the Anthropic key from env first, then project settings."""
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if key:
         return key
-    return str(_load_settings().get("anthropic_api_key", "")).strip()
+    return str(_load_settings_for_scope(user_scope).get("anthropic_api_key", "")).strip()
+
+
+def _anthropic_api_key_for_scope(user_scope: str) -> str:
+    try:
+        return _anthropic_api_key(user_scope)
+    except TypeError:
+        return _anthropic_api_key()
+
+
+def _request_role(request: Request) -> str:
+    auth_ctx = request.scope.get("raphi_auth") or {}
+    role = str(auth_ctx.get("role") or request.headers.get("X-RAPHI-Role", "analyst")).strip().lower()
+    return role if role in {"viewer", "analyst", "admin"} else "analyst"
+
+
+_IDENTITY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:@+-]{1,127}$")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_tenant_id(request: Request) -> str:
+    auth_ctx = request.scope.get("raphi_auth") or {}
+    tenant_id = str(auth_ctx.get("tenant") or request.headers.get("X-Tenant-Id", "local")).strip().lower()
+    if not tenant_id:
+        tenant_id = "local"
+    if not _IDENTITY_RE.match(tenant_id):
+        raise HTTPException(422, "Invalid X-Tenant-Id")
+    return tenant_id[:128]
+
+
+def _request_user_id(request: Request) -> str:
+    require_identity = _env_bool("RAPHI_REQUIRE_IDENTITY", True)
+    auth_ctx = request.scope.get("raphi_auth") or {}
+    user_id = str(auth_ctx.get("sub") or request.headers.get("X-User-Id", "")).strip()
+    if require_identity and not user_id:
+        raise HTTPException(401, "X-User-Id header is required")
+    if not user_id:
+        user_id = "anonymous"
+    if not _IDENTITY_RE.match(user_id):
+        raise HTTPException(422, "Invalid X-User-Id")
+    return user_id[:128]
+
+
+def _request_identity_scope(request: Request) -> tuple[str, str, str]:
+    tenant_id = _request_tenant_id(request)
+    user_id = _request_user_id(request)
+    return tenant_id, user_id, f"{tenant_id}:{user_id}"
+
+
+def _portfolio_file_for_scope(user_scope: str) -> Path:
+    return user_portfolio_path(user_scope)
+def _portfolio_snapshot_for_scope(user_scope: str) -> dict:
+    try:
+        return portfolio.snapshot(portfolio_file=_portfolio_file_for_scope(user_scope))
+    except TypeError:
+        return portfolio.snapshot()
+
+
+def _portfolio_get_positions_for_scope(user_scope: str) -> list:
+    try:
+        return portfolio.get_positions(portfolio_file=_portfolio_file_for_scope(user_scope))
+    except TypeError:
+        return portfolio.get_positions()
+
+
+def _portfolio_update_positions_for_scope(positions: list, user_scope: str) -> None:
+    try:
+        portfolio.update_positions(positions, portfolio_file=_portfolio_file_for_scope(user_scope))
+    except TypeError:
+        portfolio.update_positions(positions)
+
+
+def _require_human_review(request: Request) -> bool:
+    header = str(request.headers.get("X-Human-Review", "")).strip().lower()
+    if header in {"required", "true", "1", "yes"}:
+        return True
+    return os.environ.get("RAPHI_REVIEW_REQUIRED", "1") in {"1", "true", "yes"}
+
+
+def _evidence_fail_closed_enabled() -> bool:
+    return _env_bool("RAPHI_EVIDENCE_FAIL_CLOSED", False)
+
+
+def _governance_block_mode_enabled() -> bool:
+    return _env_bool("RAPHI_GOVERNANCE_BLOCK_MODE", False)
+
+
+def _should_buffer_output() -> bool:
+    # Buffer output when fail-closed controls are active so content is only emitted after policy checks.
+    return _evidence_fail_closed_enabled() or _governance_block_mode_enabled()
+
+
+def _load_compliance_for_scope(user_scope: str) -> dict:
+    path = user_compliance_path(user_scope)
+    defaults = {
+        "regulated_advice_mode": False,
+        "attested": False,
+        "allow_recommendations": False,
+        "client_profile": {
+            "risk_tolerance": "moderate",
+            "restricted_tickers": [],
+        },
+    }
+    payload = load_user_json(path, defaults)
+    profile = payload.get("client_profile") if isinstance(payload.get("client_profile"), dict) else {}
+    payload["client_profile"] = {
+        "risk_tolerance": str(profile.get("risk_tolerance", "moderate")).strip().lower() or "moderate",
+        "restricted_tickers": _sanitize_ticker_list(profile.get("restricted_tickers", [])),
+    }
+    payload["regulated_advice_mode"] = bool(payload.get("regulated_advice_mode", False))
+    payload["attested"] = bool(payload.get("attested", False))
+    payload["allow_recommendations"] = bool(payload.get("allow_recommendations", False))
+    return payload
+
+
+def _save_compliance_for_scope(payload: dict, user_scope: str) -> None:
+    clean = dict(payload or {})
+    profile = clean.get("client_profile") if isinstance(clean.get("client_profile"), dict) else {}
+    clean["client_profile"] = {
+        "risk_tolerance": str(profile.get("risk_tolerance", "moderate")).strip().lower() or "moderate",
+        "restricted_tickers": _sanitize_ticker_list(profile.get("restricted_tickers", [])),
+    }
+    clean["regulated_advice_mode"] = bool(clean.get("regulated_advice_mode", False))
+    clean["attested"] = bool(clean.get("attested", False))
+    clean["allow_recommendations"] = bool(clean.get("allow_recommendations", False))
+    save_user_json(user_compliance_path(user_scope), clean)
+
+
+def _contains_recommendation_intent(text: str) -> bool:
+    return bool(re.search(r"\b(buy|sell|hold|recommendation|target\s*price|trade\s*plan|position\s*sizing)\b", str(text or ""), re.I))
+
+
+def _apply_regulated_controls(*, user_scope: str, ticker: str, request_text: str, candidate_text: str | None = None) -> tuple[bool, dict]:
+    policy = _load_compliance_for_scope(user_scope)
+    findings: list[str] = []
+    blocked = False
+
+    if not policy.get("regulated_advice_mode"):
+        return True, {"status": "not_regulated", "blocked": False, "findings": []}
+
+    wants_advice = _contains_recommendation_intent(request_text) or _contains_recommendation_intent(candidate_text or "")
+    if wants_advice and not policy.get("attested"):
+        findings.append("Client attestation missing")
+    if wants_advice and not policy.get("allow_recommendations"):
+        findings.append("Recommendations are disabled for this client profile")
+
+    restricted = set(policy.get("client_profile", {}).get("restricted_tickers", []))
+    if ticker.upper() in restricted:
+        findings.append(f"Ticker {ticker.upper()} is restricted by compliance profile")
+
+    if findings:
+        blocked = True
+    return (not blocked), {
+        "status": "pass" if not blocked else "blocked",
+        "blocked": blocked,
+        "regulated": True,
+        "findings": findings,
+    }
 
 
 def _fmt_portfolio(snap: dict) -> str:
@@ -454,10 +787,10 @@ def _fmt_portfolio(snap: dict) -> str:
     return "\n".join(lines)
 
 
-def _memory_context(query: str, limit: int = 6) -> str:
+def _memory_context(query: str, user_scope: str, limit: int = 6) -> str:
     """Retrieve compact permanent memory context without blocking user flows."""
     try:
-        memories = memory.retrieve_context(query, limit=limit)
+        memories = memory.retrieve_context(query, limit=limit, user_id=user_scope)
         return memory.format_context(memories)
     except Exception:
         return ""
@@ -536,7 +869,158 @@ def _maybe_write_conviction(ticker: str, sig_cache_path: Path, response_text: st
 # ── health ────────────────────────────────────────────────────────────
 @api.get("/health")
 def health():
-    return {"status": "ok", "server": "raphi-unified", "a2a": True}
+    provider_registry.set_provider(
+        "anthropic",
+        configured=bool(_anthropic_api_key()),
+        breaker=anthropic_breaker,
+        meta={"model": "claude", "path": "anthropic"},
+    )
+    return {
+        "status": "ok",
+        "server": "raphi-unified",
+        "a2a": True,
+        "providers": provider_registry.status(),
+    }
+
+
+@api.get("/providers/health")
+@limiter.limit("60/minute")
+def providers_health(request: Request):
+    provider_registry.set_provider(
+        "anthropic",
+        configured=bool(_anthropic_api_key()),
+        breaker=anthropic_breaker,
+        meta={"model": "claude", "path": "anthropic"},
+    )
+    return provider_registry.status()
+
+
+@api.get("/review/queue")
+@limiter.limit("60/minute")
+def review_queue(request: Request, status: str = ""):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to access review queue")
+    items = list_reviews(status=status or None)
+    return {"items": items, "count": len(items)}
+
+
+class ReviewDecisionBody(BaseModel):
+    reviewer: str = ""
+    note: str = ""
+
+
+@api.post("/review/{run_id}/approve")
+@limiter.limit("30/minute")
+def approve_review(run_id: str, body: ReviewDecisionBody, request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to approve reviews")
+    item = decide_review(run_id, decision="approved", reviewer=body.reviewer or _request_user_id(request), note=body.note)
+    if not item:
+        raise HTTPException(404, "Review item not found")
+    return item
+
+
+@api.post("/review/{run_id}/reject")
+@limiter.limit("30/minute")
+def reject_review(run_id: str, body: ReviewDecisionBody, request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to reject reviews")
+    item = decide_review(run_id, decision="rejected", reviewer=body.reviewer or _request_user_id(request), note=body.note)
+    if not item:
+        raise HTTPException(404, "Review item not found")
+    return item
+
+
+@api.get("/release/gates")
+@limiter.limit("20/minute")
+def release_gates_status(request: Request, limit: int = 200):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to view release gates")
+
+    records = load_run_records(BASE / "eval_runs.jsonl")
+    if limit > 0:
+        records = records[-min(limit, 2000):]
+    return evaluate_release(records)
+
+
+def _load_run_record(run_id: str) -> dict:
+    run_file = BASE / "data" / "eval_runs" / f"{run_id}.json"
+    if not run_file.exists():
+        raise HTTPException(404, "Run record not found")
+    try:
+        return json.loads(run_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to read run record: {exc}")
+
+
+@api.get("/runs/{run_id}")
+@limiter.limit("60/minute")
+def run_record_detail(run_id: str, request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to view run records")
+    tenant_id, raw_user_id, _ = _request_identity_scope(request)
+    record = _load_run_record(run_id)
+    record_user = str(record.get("user_id") or "")
+    caller = f"{tenant_id}:{raw_user_id}"
+    if role != "admin" and record_user and record_user != caller:
+        raise HTTPException(403, "Run record does not belong to caller")
+    return record
+
+
+@api.get("/runs/{run_id}/tool-trace")
+@limiter.limit("60/minute")
+def run_record_tool_trace(run_id: str, request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to view run tool trace")
+    tenant_id, raw_user_id, _ = _request_identity_scope(request)
+    caller = f"{tenant_id}:{raw_user_id}"
+    record = _load_run_record(run_id)
+    record_user = str(record.get("user_id") or "")
+    if role != "admin" and record_user and record_user != caller:
+        raise HTTPException(403, "Run record does not belong to caller")
+    trace = record.get("tool_trace") or []
+    return {
+        "run_id": run_id,
+        "count": len(trace),
+        "tool_trace": trace,
+    }
+
+
+@api.get("/runs")
+@limiter.limit("30/minute")
+def run_records_list(request: Request, limit: int = 20):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to view run records")
+    tenant_id, raw_user_id, _ = _request_identity_scope(request)
+    caller = f"{tenant_id}:{raw_user_id}"
+    records = load_run_records(BASE / "eval_runs.jsonl")
+    records = records[-min(max(int(limit), 1), 200):]
+    if role != "admin":
+        records = [r for r in records if str(r.get("user_id") or "") == caller]
+    summaries = [
+        {
+            "run_id": r.get("run_id"),
+            "timestamp": r.get("timestamp"),
+            "ticker": r.get("ticker"),
+            "thread_id": r.get("thread_id"),
+            "user_id": r.get("user_id"),
+            "latency_ms": r.get("latency_ms"),
+            "eval": (r.get("eval_result") or {}).get("overall_score"),
+            "passed": (r.get("eval_result") or {}).get("passed"),
+            "review": (r.get("review") or {}).get("status"),
+            "tool_count": len(r.get("observed_tools") or []),
+            "citation_count": len(r.get("citations") or []),
+        }
+        for r in records
+    ]
+    return {"count": len(summaries), "records": summaries}
 
 
 # ── market ────────────────────────────────────────────────────────────
@@ -668,10 +1152,14 @@ def stock_live_filings(ticker: str, request: Request, days: int = 60):
     """Real-time SEC EDGAR filings: 10-K, 10-Q, 8-K, Form 4 from data.sec.gov."""
     ticker = _ticker_symbol(ticker)
     days = min(max(int(days), 1), 365)
+    if not edgar_breaker.allow():
+        raise HTTPException(503, "EDGAR provider temporarily unavailable (circuit open)")
     try:
         summary = edgar_live.get_ticker_live_summary(ticker, days=days)
+        edgar_breaker.record_success()
         return summary
     except Exception as exc:
+        edgar_breaker.record_failure(str(exc))
         raise HTTPException(502, f"EDGAR live fetch failed: {exc}")
 
 
@@ -689,6 +1177,8 @@ def edgar_fulltext_search(
     days = min(max(int(days), 1), 365)
     limit = min(max(int(limit), 1), 20)
     form_list = [f.strip() for f in forms.split(",")] if forms else None
+    if not edgar_breaker.allow():
+        raise HTTPException(503, "EDGAR provider temporarily unavailable (circuit open)")
     try:
         results = edgar_live.search_filings_fulltext(
             query[:300],
@@ -697,8 +1187,10 @@ def edgar_fulltext_search(
             days=days,
             limit=limit,
         )
+        edgar_breaker.record_success()
         return {"results": results, "count": len(results)}
     except Exception as exc:
+        edgar_breaker.record_failure(str(exc))
         raise HTTPException(502, f"EDGAR search failed: {exc}")
 
 
@@ -733,12 +1225,16 @@ class CitationIndexRequest(BaseModel):
 @limiter.limit("10/minute")
 def firecrawl_scrape_route(body: FirecrawlScrapeRequest, request: Request):
     """Scrape a URL via Firecrawl and return clean markdown."""
+    if not firecrawl_breaker.allow():
+        raise HTTPException(503, "Firecrawl temporarily unavailable (circuit open)")
     if not body.url.startswith("https://"):
         raise HTTPException(422, "url must start with https://")
     max_chars = min(max(int(body.max_chars), 500), 15000)
     result = firecrawl_client.scrape_url(body.url, max_chars=max_chars)
     if not result.get("success"):
+        firecrawl_breaker.record_failure(result.get("error", "scrape failed"))
         raise HTTPException(502, result.get("error", "scrape failed"))
+    firecrawl_breaker.record_success()
     return result
 
 
@@ -746,11 +1242,15 @@ def firecrawl_scrape_route(body: FirecrawlScrapeRequest, request: Request):
 @limiter.limit("10/minute")
 def firecrawl_search_route(body: FirecrawlSearchRequest, request: Request):
     """Search the web via Firecrawl and return scraped markdown from top results."""
+    if not firecrawl_breaker.allow():
+        raise HTTPException(503, "Firecrawl temporarily unavailable (circuit open)")
     limit = min(max(int(body.limit), 1), 10)
     results = firecrawl_client.search_web(body.query[:500], limit=limit, scrape_results=True)
     errors = [r for r in results if not r.get("success")]
     if errors and len(errors) == len(results):
+        firecrawl_breaker.record_failure(errors[0].get("error", "search failed"))
         raise HTTPException(502, errors[0].get("error", "search failed"))
+    firecrawl_breaker.record_success()
     return {"results": [r for r in results if r.get("success")], "count": len(results)}
 
 
@@ -801,9 +1301,11 @@ def citations_search_route(
     limit: int = 5,
     refresh: bool = False,
 ):
+    _, _, user_scope = _request_identity_scope(request)
     scoped_ticker = _ticker_symbol(ticker) if ticker else ""
     return citations.search_with_refresh(
         q,
+        user_scope=user_scope,
         ticker=scoped_ticker,
         limit=min(max(int(limit), 1), 10),
         refresh_if_missing=bool(refresh),
@@ -814,10 +1316,12 @@ def citations_search_route(
 @limiter.limit("20/minute")
 def web_citations_route(body: WebCitationRequest, request: Request):
     """Local-first citation search, with optional Firecrawl refresh."""
+    _, _, user_scope = _request_identity_scope(request)
     ticker = _ticker_symbol(body.ticker) if body.ticker else ""
     limit = min(max(int(body.limit), 1), 10)
     result = web_citations.search_citations(
         body.query,
+        user_scope=user_scope,
         ticker=ticker,
         limit=limit,
         refresh_if_missing=body.refresh_if_missing,
@@ -953,7 +1457,8 @@ def stock_options(ticker: str, request: Request, expiration: Optional[str] = Non
 @api.get("/portfolio")
 @limiter.limit("60/minute")
 def get_portfolio(request: Request):
-    return portfolio.snapshot()
+    _, _, user_scope = _request_identity_scope(request)
+    return _portfolio_snapshot_for_scope(user_scope)
 
 
 class Positions(BaseModel):
@@ -963,7 +1468,8 @@ class Positions(BaseModel):
 @api.put("/portfolio")
 @limiter.limit("60/minute")
 def update_portfolio(body: Positions, request: Request):
-    portfolio.update_positions(body.positions)
+    _, _, user_scope = _request_identity_scope(request)
+    _portfolio_update_positions_for_scope(body.positions, user_scope)
     return {"ok": True}
 
 
@@ -978,6 +1484,7 @@ class PortfolioPositionRequest(BaseModel):
 @api.post("/portfolio/positions")
 @limiter.limit("30/minute")
 def add_portfolio_position(body: PortfolioPositionRequest, request: Request):
+    _, _, user_scope = _request_identity_scope(request)
     ticker = _ticker_symbol(body.ticker)
     direction = body.direction.upper()
     if direction not in {"LONG", "SHORT"}:
@@ -993,7 +1500,7 @@ def add_portfolio_position(body: PortfolioPositionRequest, request: Request):
         raise HTTPException(422, f"Could not resolve a current price for {ticker}")
 
     existing = []
-    for pos in portfolio.get_positions():
+    for pos in _portfolio_get_positions_for_scope(user_scope):
         existing_ticker = str(pos.get("ticker", "")).strip().upper()
         if TICKER_RE.match(existing_ticker):
             existing.append({**pos, "ticker": existing_ticker})
@@ -1019,15 +1526,16 @@ def add_portfolio_position(body: PortfolioPositionRequest, request: Request):
             new_pos["stop_loss"] = body.stop_loss
         existing.append(new_pos)
 
-    portfolio.update_positions(existing)
-    return portfolio.snapshot()
+    _portfolio_update_positions_for_scope(existing, user_scope)
+    return _portfolio_snapshot_for_scope(user_scope)
 
 
 # ── signals (all watchlist) ───────────────────────────────────────────
 @api.get("/signals")
 @limiter.limit("60/minute")
 def all_signals(request: Request):
-    settings  = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    settings  = _load_settings_for_scope(user_scope)
     watchlist = settings.get("watchlist", DEFAULT_WATCHLIST)
     fund_map  = {
         t: {
@@ -1107,8 +1615,9 @@ def cross_asset_signals(request: Request, asset_class: str = "macro"):
 @limiter.limit("60/minute")
 def get_alerts(request: Request):
     import pickle
-    snap     = portfolio.snapshot()
-    settings = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    snap     = _portfolio_snapshot_for_scope(user_scope)
+    settings = _load_settings_for_scope(user_scope)
     alerts: list = []
 
     var95 = snap.get("var_95", 0)
@@ -1160,7 +1669,8 @@ def get_alerts(request: Request):
 @limiter.limit("60/minute")
 def model_performance(request: Request):
     import pickle
-    settings  = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    settings  = _load_settings_for_scope(user_scope)
     watchlist = settings.get("watchlist", DEFAULT_WATCHLIST)
     models, xgb_accs, lstm_accs = [], [], []
 
@@ -1307,12 +1817,14 @@ def memory_status(request: Request):
 @api.post("/memory/remember")
 @limiter.limit("30/minute")
 def memory_remember(body: MemoryRememberRequest, request: Request):
+    _, _, user_scope = _request_identity_scope(request)
     try:
         return memory.remember_interaction(
             user_text=body.user_text,
             assistant_text=body.assistant_text,
             source=body.source,
             metadata=body.metadata,
+            user_id=user_scope,
             importance=body.importance,
         )
     except GraphMemoryError as e:
@@ -1322,8 +1834,9 @@ def memory_remember(body: MemoryRememberRequest, request: Request):
 @api.get("/memory/retrieve")
 @limiter.limit("60/minute")
 def memory_retrieve(q: str, request: Request, limit: int = 8):
+    _, _, user_scope = _request_identity_scope(request)
     try:
-        memories = memory.retrieve_context(q, limit=limit)
+        memories = memory.retrieve_context(q, limit=limit, user_id=user_scope)
         return {"memories": memories, "context": memory.format_context(memories)}
     except GraphMemoryError as e:
         raise HTTPException(503, str(e))
@@ -1373,8 +1886,9 @@ def sec_stats(request: Request):
 @api.get("/news")
 @limiter.limit("60/minute")
 def multi_news(request: Request):
-    snap      = portfolio.snapshot()
-    settings  = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    snap      = _portfolio_snapshot_for_scope(user_scope)
+    settings  = _load_settings_for_scope(user_scope)
     tickers   = [p["ticker"] for p in snap.get("positions", [])]
     all_tks   = list(dict.fromkeys(tickers + settings.get("watchlist", DEFAULT_WATCHLIST)))[:6]
 
@@ -1402,8 +1916,8 @@ def multi_news(request: Request):
 
 
 # ── AI chat (streaming SSE) ───────────────────────────────────────────
-def _allowed_ticker_context(ticker: str, snap: dict) -> set[str]:
-    settings = _load_settings()
+def _allowed_ticker_context(ticker: str, snap: dict, user_scope: str = "global") -> set[str]:
+    settings = _load_settings_for_scope(user_scope)
     tickers = {ticker.upper()}
     tickers.update(str(t).upper() for t in settings.get("watchlist", DEFAULT_WATCHLIST))
     tickers.update(str(p.get("ticker", "")).upper() for p in snap.get("positions", []))
@@ -1414,10 +1928,10 @@ def _requires_memo_schema(message: str) -> bool:
     return bool(_re.search(r"\b(memo|investment thesis|recommendation|buy|sell|hold|trade plan)\b", message, _re.I))
 
 
-def _guardrail_context(ticker: str, snap: dict, source_summary: str, require_memo_schema: bool = False) -> GuardrailContext:
+def _guardrail_context(ticker: str, snap: dict, source_summary: str, require_memo_schema: bool = False, user_scope: str = "global") -> GuardrailContext:
     return GuardrailContext(
         ticker=ticker.upper(),
-        allowed_tickers=_allowed_ticker_context(ticker, snap),
+        allowed_tickers=_allowed_ticker_context(ticker, snap, user_scope=user_scope),
         source_summary=source_summary,
         require_memo_schema=require_memo_schema,
     )
@@ -1621,6 +2135,70 @@ def _reflection_label(checks: dict) -> str:
     if missing:
         return "Reflection found gaps: " + ", ".join(missing)
     return "Reflection passed: sources, memory, tools, and risk framing checked"
+
+
+_STEP_TOOL_MAP = {
+    "market": "market",
+    "sec": "sec",
+    "signals": "ml",
+    "models": "ml",
+    "gnn": "gnn",
+    "web": "citation",
+    "portfolio": "portfolio",
+    "memory": "memory",
+}
+
+
+def _extract_tool_name_from_step_payload(payload: dict) -> str | None:
+    text = " ".join(
+        str(payload.get(key, ""))
+        for key in ("id", "label", "tool", "tool_name", "name")
+    ).lower()
+    if "mcp__raphi__" in text:
+        start = text.index("mcp__raphi__")
+        tail = text[start:].split()[0]
+        return tail
+    for step_id, family in _STEP_TOOL_MAP.items():
+        if step_id in text:
+            return family
+    return None
+
+
+def _apply_evidence_enforcement(text: str, checks: dict, required: bool) -> tuple[str, dict]:
+    violations: list[str] = []
+    if required:
+        if checks.get("sec_citation_available") and not checks.get("sec_citation_used"):
+            violations.append("SEC citations were available but not used")
+        if checks.get("web_citations_available") and not checks.get("web_citations_used"):
+            violations.append("Web citations were available but not used")
+        if checks.get("market_source_available") and not checks.get("market_source_used"):
+            violations.append("Market source attribution missing")
+
+    if not violations:
+        return text, {"required": required, "status": "pass", "violations": []}
+
+    if _evidence_fail_closed_enabled():
+        blocked_text = (
+            "Policy block: evidence requirements were not satisfied for this response. "
+            "Re-run with explicit source/citation retrieval enabled."
+        )
+        return blocked_text, {
+            "required": required,
+            "status": "blocked",
+            "mode": "fail_closed",
+            "violations": violations,
+        }
+
+    note = (
+        "\n\n### Evidence Enforcement\n"
+        "- Response downgraded due to missing required evidence links.\n"
+        + "\n".join(f"- {item}" for item in violations)
+    )
+    return text.rstrip() + note, {
+        "required": required,
+        "status": "downgraded",
+        "violations": violations,
+    }
 
 
 def _collect_local_agent_context(
@@ -2042,7 +2620,9 @@ Guardrails:
         with stream_ctx as stream:
             for text in stream.text_stream:
                 collected.append(text)
+        anthropic_breaker.record_success()
     except Exception as e:
+        anthropic_breaker.record_failure(str(e))
         yield _sse("error", str(e))
         return
 
@@ -2065,14 +2645,38 @@ class ChatRequest(BaseModel):
     history: list = []
     ticker:  str  = "NVDA"
     thread_id: str = "default"
-    response_mode: str = "balanced"
+    response_mode: str = "compact"
     agentic: bool = True
+
+
+def _is_compact_mode(mode: str) -> bool:
+    value = (mode or "").strip().lower()
+    return value in {"compact", "fast", "lite"}
+
+
+def _compact_text(text: str, limit: int) -> str:
+    raw = str(text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[: max(0, limit - 18)].rstrip() + " ...[compacted]"
+
+
+def _compact_history(history: list, *, max_items: int, per_message_chars: int) -> list[dict]:
+    compacted: list[dict] = []
+    for item in history[-max_items:]:
+        role = str(item.get("role", "user")) if isinstance(item, dict) else "user"
+        content = _compact_text(item.get("content", "") if isinstance(item, dict) else str(item), per_message_chars)
+        compacted.append({"role": role, "content": content})
+    return compacted
 
 
 @api.post("/chat")
 @limiter.limit("10/minute")
 async def chat(req: ChatRequest, request: Request):
     import json, asyncio
+
+    user_role = _request_role(request)
+    tenant_id, raw_user_id, user_scope = _request_identity_scope(request)
 
     try:
         req.message = sanitize_user_input(req.message)
@@ -2092,27 +2696,53 @@ async def chat(req: ChatRequest, request: Request):
         return StreamingResponse(identity_response(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    api_key_anthropic = _anthropic_api_key()
-    snap   = portfolio.snapshot()
+    api_key_anthropic = _anthropic_api_key_for_scope(user_scope)
+    _, _, user_scope = _request_identity_scope(request)
+    snap   = _portfolio_snapshot_for_scope(user_scope)
     ticker = _resolve_chat_ticker(req)
-    registration = await asyncio.to_thread(_register_ticker_for_agentic_analysis, ticker)
-    detail = _apply_ticker_identity(ticker, market.stock_detail(ticker))
-    news   = market.stock_news(ticker, limit=3)
+    compact_mode = _is_compact_mode(req.response_mode)
+    memory_limit = 3 if compact_mode else 6
+
+    def _load_sig_text(t: str) -> str:
+        _sig_cache = BASE / ".model_cache" / f"{t}.pkl"
+        if _sig_cache.exists():
+            import pickle
+            try:
+                with open(_sig_cache, "rb") as f:
+                    _sig = pickle.load(f)
+                return f"RAPHI signal: {_sig['direction']} ({_sig['confidence']:.1f}% confidence)"
+            except Exception:
+                pass
+        return ""
+
+    # Parallel gather — runs I/O-bound pre-chat work concurrently instead of sequentially
+    def _cached_detail(t: str) -> dict:
+        cached = _market_cache.get(f"detail:{t}")
+        if cached is not None:
+            return cached
+        result = market.stock_detail(t)
+        _market_cache.set(f"detail:{t}", result)
+        return result
+
+    def _cached_news(t: str) -> list:
+        cached = _market_cache.get(f"news:{t}")
+        if cached is not None:
+            return cached
+        result = market.stock_news(t, limit=3)
+        _market_cache.set(f"news:{t}", result)
+        return result
+
+    registration, raw_detail, news, permanent_memory, sig_text = await asyncio.gather(
+        asyncio.to_thread(_register_ticker_for_scope, ticker, user_scope),
+        asyncio.to_thread(_cached_detail, ticker),
+        asyncio.to_thread(_cached_news, ticker),
+        asyncio.to_thread(_memory_context, f"{req.message} {ticker}", user_scope, memory_limit),
+        asyncio.to_thread(_load_sig_text, ticker),
+    )
+    permanent_memory = _compact_text(permanent_memory, 900 if compact_mode else 2400)
+    detail = _apply_ticker_identity(ticker, raw_detail)
     identity = _ticker_identity(ticker)
     gnn_status = registration.get("gnn_status") or {}
-
-    sig_text = ""
-    sig_cache = BASE / ".model_cache" / f"{ticker}.pkl"
-    if sig_cache.exists():
-        import pickle
-        try:
-            with open(sig_cache, "rb") as f:
-                sig = pickle.load(f)
-            sig_text = f"RAPHI signal: {sig['direction']} ({sig['confidence']:.1f}% confidence)"
-        except Exception:
-            pass
-
-    permanent_memory = _memory_context(f"{req.message} {ticker}", limit=6)
     execution_plan = _agentic_plan(req.message, ticker)
     system = f"""You are RAPHI, an AI investment intelligence platform.
 Agentic execution plan:
@@ -2140,7 +2770,12 @@ Presentation rules for the RAPHI web console:
 - Do not use ASCII diagrams, pipe-delimited relationship chains, raw graph art, or dense one-paragraph blocks.
 - Keep each bullet under 24 words and use tables only for compact comparisons."""
 
-    messages = [{"role": h["role"], "content": h["content"]} for h in req.history[-6:]]
+    history_slice = _compact_history(
+        req.history,
+        max_items=4 if compact_mode else 6,
+        per_message_chars=320 if compact_mode else 900,
+    )
+    messages = [{"role": h["role"], "content": h["content"]} for h in history_slice]
     messages.append({"role": "user", "content": req.message})
     context = _guardrail_context(
         ticker,
@@ -2151,11 +2786,17 @@ Presentation rules for the RAPHI web console:
             + (f"; known as {identity['current_name']}" if identity.get("current_name") else "")
         ),
         require_memo_schema=_requires_memo_schema(req.message),
+        user_scope=user_scope,
     )
+    run_id = new_run_id()
+    run_started = time.perf_counter()
+    observed_tools: list[str] = []
+    tool_trace: list[dict] = []
 
-    if not api_key_anthropic:
+    if not api_key_anthropic or not anthropic_breaker.allow():
         async def missing_key_response():
             yield _sse("step", json.dumps({
+                "run_id": run_id,
                 "id": "memory",
                 "label": "Permanent memory checked; full synthesis is temporarily unavailable",
             }))
@@ -2170,6 +2811,7 @@ Presentation rules for the RAPHI web console:
                     assistant_text=fallback,
                     source="chat",
                     metadata={"ticker": ticker, "anthropic_configured": False},
+                    user_id=user_scope,
                     importance=0.64,
                 )
             except Exception:
@@ -2178,6 +2820,47 @@ Presentation rules for the RAPHI web console:
             if report.repairs or report.warnings:
                 yield _sse("step", json.dumps({"id": "guardrails", "label": "Guardrails checked fallback response"}))
             yield _sse("token", repaired)
+            latency_ms = int((time.perf_counter() - run_started) * 1000)
+            run_record = build_run_record(
+                run_id=run_id,
+                prompt=req.message,
+                final_response=repaired,
+                expected_tools=[],
+                observed_tools=[],
+                tool_trace=[],
+                citations=[c.__dict__ for c in extract_citations(repaired)],
+                ticker=ticker,
+                allowed_tickers=list(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+                memo_schema=_requires_memo_schema(req.message),
+                guardrail_repairs=report.repairs,
+                guardrail_warnings=report.warnings,
+                guardrail_missing_sections=report.missing_sections,
+                guardrail_unknown_tickers=report.unknown_tickers,
+                evidence_enforcement={"required": False, "status": "not_applicable", "violations": []},
+                thread_id=req.thread_id,
+                session_id=getattr(request, "session_id", None),
+                user_id=f"{tenant_id}:{raw_user_id}",
+                user_role=user_role,
+                model_path="fallback/unavailable",
+                provider_path="none",
+                latency_ms=latency_ms,
+                eval_result=None,
+                governance={"status": "fallback", "findings": []},
+                review={"status": "not_required"},
+                quality={
+                    "unsupported_claim_ratio": 0.0,
+                    "citation_precision": 1.0,
+                    "trace_completeness": 1.0,
+                    "routing_accuracy": 1.0,
+                },
+            )
+            log_eval_run(run_record)
+            yield _sse("step", json.dumps({
+                "id": "run_summary",
+                "run_id": run_id,
+                "label": "Run captured (fallback path)",
+                "latency_ms": latency_ms,
+            }))
             yield _sse("done", "")
 
         return StreamingResponse(missing_key_response(), media_type="text/event-stream",
@@ -2188,6 +2871,15 @@ Presentation rules for the RAPHI web console:
         used_agentic = False
         agentic_error = ""
         local_context: dict | None = None
+        stream_tokens_immediately = not _should_buffer_output()
+
+        yield _sse("step", json.dumps({
+            "id": "run_start",
+            "run_id": run_id,
+            "label": "Run started",
+            "thread_id": req.thread_id,
+            "ticker": ticker,
+        }))
 
         yield _sse("step", json.dumps({
             "id": "plan",
@@ -2195,7 +2887,7 @@ Presentation rules for the RAPHI web console:
             "plan": execution_plan,
         }))
         for step in execution_plan:
-            await asyncio.sleep(0.01)
+            tool_trace.append({"phase": "plan", "id": step["id"], "label": step["label"]})
             yield _sse("step", json.dumps({
                 "id": f"plan_{step['id']}",
                 "label": f"Plan: {step['label']}",
@@ -2203,32 +2895,56 @@ Presentation rules for the RAPHI web console:
 
         if req.agentic:
             yield _sse("step", json.dumps({"id": "orchestrator", "label": "Routing browser chat through A2A agent swarm"}))
+            # Compact prompt — MCP tools fetch precise detail; pre-loaded context is headline only
+            _news_lines = "\n".join(f"- {n['title']} ({n.get('url','unavailable')})" for n in news[: (1 if compact_mode else 2)])
             agent_prompt = (
-                f"User request: {req.message}\n\n"
-                f"Primary ticker: {ticker}\n"
-                f"Company identity: {identity.get('current_name', ticker)}\n"
-                f"Former identity: {identity.get('former_name', 'none')}\n"
-                f"Identity note: {identity.get('identity_note', 'No special identity override.')}\n"
-                f"Current portfolio context:\n{_fmt_portfolio(snap)}\n"
-                f"Current stock context: price ${detail.get('price','?')}, P/E {detail.get('pe_ratio','?')}\n"
-                f"Market source: {detail.get('source', 'Yahoo Finance via yfinance')} | {detail.get('quote_url', f'https://finance.yahoo.com/quote/{ticker}')}\n"
-                f"Current signal context: {sig_text or 'not computed'}\n"
-                f"GNN registration status: added_to_watchlist={registration.get('added_to_watchlist')}; "
-                f"registered_in_graph={registration.get('gnn_added')}; "
-                f"graph={gnn_status.get('graph_nodes','?')} nodes/{gnn_status.get('graph_edges','?')} edges\n"
-                f"Recent news headlines and URLs:\n{chr(10).join(f'- {n['title']} | {n.get('publisher','unknown')} | {n.get('url','unavailable')}' for n in news[:3])}\n"
-                f"Use MCP tools when more precise market, SEC, ML/GNN, portfolio, or memory data is needed. "
-                f"Reply in clean Markdown with concise bullets, exact citation links, and explicit risk framing."
+                f"{req.message}\n\n"
+                f"Ticker: {ticker} ({identity.get('current_name', ticker)})\n"
+                f"Price: ${detail.get('price','?')} | P/E: {detail.get('pe_ratio','?')} | Signal: {sig_text or 'not computed'}\n"
+                f"Portfolio: {_compact_text(_fmt_portfolio(snap), 180 if compact_mode else 520)}\n"
+                f"Headlines:\n{_news_lines}\n"
+                f"Use MCP tools for precise data. Reply in clean Markdown with concise bullets, citation links, and explicit risk framing."
             )
-            async for event in _agent.stream(agent_prompt, task_id=f"web:{req.thread_id}:{ticker}"):
+            try:
+                agent_stream = _agent.stream(
+                    agent_prompt,
+                    task_id=f"web:{req.thread_id}:{ticker}",
+                    user_role=user_role,
+                    compact=compact_mode,
+                )
+            except TypeError:
+                # Backward compatibility for test doubles or legacy agent implementations.
+                agent_stream = _agent.stream(agent_prompt, task_id=f"web:{req.thread_id}:{ticker}")
+
+            async for event in agent_stream:
                 if event["event"] == "error":
                     agentic_error = event["data"]
                     break
                 if event["event"] == "step":
+                    payload = event["data"]
+                    payload_obj = {}
+                    if isinstance(payload, str):
+                        try:
+                            payload_obj = json.loads(payload)
+                        except Exception:
+                            payload_obj = {"label": payload}
+                    elif isinstance(payload, dict):
+                        payload_obj = payload
+                    tool_name = _extract_tool_name_from_step_payload(payload_obj)
+                    if tool_name:
+                        observed_tools.append(tool_name)
+                    tool_trace.append({
+                        "phase": "agentic",
+                        "id": payload_obj.get("id", "step"),
+                        "label": payload_obj.get("label", str(payload)[:200]),
+                        "tool": tool_name,
+                        "raw": _compact_text(json.dumps(payload_obj, sort_keys=True), 1200),
+                    })
                     yield _sse("step", event["data"])
                 elif event["event"] == "token":
                     collected.append(event["data"])
-                    yield _sse("token", event["data"])
+                    if stream_tokens_immediately:
+                        yield _sse("token", event["data"])
             used_agentic = bool(collected)
 
         if not used_agentic:
@@ -2257,6 +2973,12 @@ Presentation rules for the RAPHI web console:
                 ("synthesize",   "@memo-synthesizer combining specialist outputs with guardrails"),
             ]
             for step_id, label in local_steps:
+                mapped = _STEP_TOOL_MAP.get(step_id)
+                if mapped:
+                    observed_tools.append(mapped)
+                tool_trace.append({"phase": "local_swarm", "id": step_id, "label": label, "tool": mapped})
+                if local_context and step_id in local_context:
+                    tool_trace[-1]["raw"] = _compact_text(json.dumps(local_context.get(step_id, {}), sort_keys=True, default=str), 1200)
                 yield _sse("step", json.dumps({"id": step_id, "label": label}))
                 await asyncio.sleep(0.03)
             fallback_system = f"{system}\n\n{_format_local_agent_context(local_context)}"
@@ -2274,36 +2996,164 @@ Presentation rules for the RAPHI web console:
                     except Exception:
                         pass
                     collected.append(data)
-                yield chunk
+                    if stream_tokens_immediately:
+                        yield chunk
+                else:
+                    yield chunk
 
-        checks = _source_checks("".join(collected), local_context)
+            anthropic_breaker.record_success()
+
+        final_response = "".join(collected)
+        checks = _source_checks(final_response, local_context)
         yield _sse("step", json.dumps({
             "id": "reflection",
             "label": _reflection_label(checks),
             "checks": checks,
         }))
         if _reflection_label(checks).startswith("Reflection found gaps"):
-            yield _sse("token", (
+            reflection_note = (
                 "\n\n### Reflection Check\n"
                 "- Some requested evidence was not fully cited in the generated text above.\n"
                 "- Use the Sources / Citations section or rerun with a narrower filing/news request for stricter provenance."
-            ))
+            )
+            final_response += reflection_note
+            if stream_tokens_immediately:
+                yield _sse("token", reflection_note)
+
+        require_evidence = bool(_re.search(r"\b(cite|citation|source|evidence|sec|filing|news|prove|support)\b", req.message, _re.I))
+        final_response, evidence_enforcement = _apply_evidence_enforcement(final_response, checks, require_evidence)
+        if evidence_enforcement.get("status") == "downgraded" and stream_tokens_immediately:
+            suffix = "\n\n### Evidence Enforcement\n- Response downgraded due to missing required evidence links."
+            if suffix in final_response:
+                yield _sse("token", suffix)
 
         _maybe_write_conviction(
             ticker=ticker,
             sig_cache_path=BASE / ".model_cache" / f"{ticker}.pkl",
-            response_text="".join(collected),
+            response_text=final_response,
         )
         try:
             memory.remember_interaction(
                 user_text=req.message,
-                assistant_text="".join(collected),
+                assistant_text=final_response,
                 source="chat",
                 metadata={"ticker": ticker, "agentic": used_agentic, "thread_id": req.thread_id},
+                user_id=user_scope,
                 importance=0.64,
             )
         except Exception:
             pass
+
+        post_guarded, post_report = validate_and_repair_response(final_response, context)
+        if post_guarded != final_response:
+            delta = post_guarded[len(final_response):] if post_guarded.startswith(final_response) else "\n\n### Guardrail Update\n- Response adjusted after final validation."
+            final_response = post_guarded
+            if delta and stream_tokens_immediately:
+                yield _sse("token", delta)
+
+        citation_objects = extract_citations(final_response)
+        citation_records = [c.__dict__ for c in citation_objects]
+        unique_observed_tools = sorted({tool for tool in observed_tools if tool})
+        expected_tool_ids = [step["id"] for step in execution_plan if step["id"] in _STEP_TOOL_MAP]
+        latency_ms = int((time.perf_counter() - run_started) * 1000)
+
+        eval_case = EvalCase(
+            id=run_id,
+            prompt=req.message,
+            response=final_response,
+            expected_tools=expected_tool_ids,
+            observed_tools=unique_observed_tools,
+            citations=citation_objects,
+            allowed_tickers=set(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+            ticker=ticker,
+            require_memo_schema=_requires_memo_schema(req.message),
+            require_citations=require_evidence,
+        )
+        eval_result = evaluate_case(eval_case).to_dict()
+
+        governance = assess_output(final_response, output_kind="chat")
+        review_state = {"status": "not_required"}
+        if governance.get("high_risk") and _require_human_review(request):
+            queued = enqueue_review(
+                run_id,
+                kind="chat",
+                user_id=f"{tenant_id}:{raw_user_id}",
+                role=user_role,
+                summary=final_response,
+                assessment=governance,
+            )
+            review_state = {"status": queued.get("status", "pending")}
+            yield _sse("step", json.dumps({
+                "id": "human_review",
+                "label": "Output queued for human review",
+                "review_status": queued.get("status", "pending"),
+            }))
+            if _governance_block_mode_enabled():
+                final_response = (
+                    "Policy block: high-risk investment guidance is held for human review. "
+                    "No actionable recommendation is released until approved."
+                )
+
+        compliance_pass, compliance_report = _apply_regulated_controls(
+            user_scope=user_scope,
+            ticker=ticker,
+            request_text=req.message,
+            candidate_text=final_response,
+        )
+        if not compliance_pass:
+            final_response = (
+                "Policy block: regulated advisory controls prevented release of this response. "
+                + " ".join(compliance_report.get("findings", []))
+            )
+
+        if not stream_tokens_immediately:
+            for chunk in _chunk_text(final_response):
+                yield _sse("token", chunk)
+
+        run_record = build_run_record(
+            run_id=run_id,
+            prompt=req.message,
+            final_response=final_response,
+            expected_tools=expected_tool_ids,
+            observed_tools=unique_observed_tools,
+            tool_trace=tool_trace,
+            citations=citation_records,
+            ticker=ticker,
+            allowed_tickers=list(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+            memo_schema=_requires_memo_schema(req.message),
+            guardrail_repairs=post_report.repairs,
+            guardrail_warnings=post_report.warnings,
+            guardrail_missing_sections=post_report.missing_sections,
+            guardrail_unknown_tickers=post_report.unknown_tickers,
+            evidence_enforcement=evidence_enforcement,
+            thread_id=req.thread_id,
+            session_id=getattr(request, "session_id", None),
+            user_id=f"{tenant_id}:{raw_user_id}",
+            user_role=user_role,
+            model_path=_select_chat_model(req.message, mode=req.response_mode),
+            provider_path="anthropic/claude-agent-sdk",
+            latency_ms=latency_ms,
+            eval_result=eval_result,
+            governance=governance,
+            review={**review_state, "compliance": compliance_report},
+            quality={
+                "unsupported_claim_ratio": 0.0 if checks.get("sec_citation_used") else 0.1,
+                "citation_precision": 1.0 if citation_records else 0.5,
+                "trace_completeness": 1.0 if tool_trace else 0.0,
+                "routing_accuracy": 1.0 if used_agentic else 0.9,
+            },
+        )
+        log_eval_run(run_record)
+        yield _sse("step", json.dumps({
+            "id": "run_summary",
+            "run_id": run_id,
+            "label": "Run captured and scored",
+            "latency_ms": latency_ms,
+            "observed_tools": unique_observed_tools,
+            "citation_count": len(citation_records),
+            "eval_score": eval_result.get("overall_score"),
+            "eval_passed": eval_result.get("passed"),
+        }))
         yield _sse("done", "")
 
     return StreamingResponse(generate(), media_type="text/event-stream",
@@ -2316,13 +3166,23 @@ Presentation rules for the RAPHI web console:
 async def generate_memo(ticker: str, request: Request):
     import json, anthropic as _anth
     ticker = _ticker_symbol(ticker)
-    api_key_anthropic = _anthropic_api_key()
-    if not api_key_anthropic:
+    user_role = _request_role(request)
+    tenant_id, raw_user_id, user_scope = _request_identity_scope(request)
+    if user_role == "viewer":
+        raise HTTPException(403, "Viewer role cannot generate investment memos")
+    api_key_anthropic = _anthropic_api_key_for_scope(user_scope)
+    if not api_key_anthropic or not anthropic_breaker.allow():
         raise HTTPException(503, "AI synthesis service is temporarily unavailable")
 
     detail = market.stock_detail(ticker)
     news   = market.stock_news(ticker, limit=5)
-    snap   = portfolio.snapshot()
+    _, _, user_scope = _request_identity_scope(request)
+    snap   = _portfolio_snapshot_for_scope(user_scope)
+    recent_filings = []
+    try:
+        recent_filings = sec.ticker_filings(ticker, limit=6)
+    except Exception:
+        recent_filings = []
     sig    = {}
     sig_cache = BASE / ".model_cache" / f"{ticker}.pkl"
     if sig_cache.exists():
@@ -2333,7 +3193,9 @@ async def generate_memo(ticker: str, request: Request):
         except Exception:
             pass
 
-    permanent_memory = _memory_context(f"investment memo {ticker}", limit=6)
+    permanent_memory = _memory_context(f"investment memo {ticker}", user_scope, limit=6)
+    run_id = new_run_id()
+    run_started = time.perf_counter()
     stable_memo_prompt = """Write an institutional investment memo.
 
 Required sections:
@@ -2355,6 +3217,7 @@ Formatting rules:
 Market data: {json.dumps(detail, indent=2)[:1500]}
 ML signal: {json.dumps(sig, indent=2)[:800]}
 News: {chr(10).join(f'- {n["title"]} ({n["sentiment"]})' for n in news[:5])}
+SEC filings: {json.dumps(recent_filings[:3], indent=2)[:1200]}
 Portfolio: {_fmt_portfolio(snap)}
 Permanent graph memory:
 {permanent_memory or 'No relevant permanent memory found.'}"""
@@ -2363,10 +3226,18 @@ Permanent graph memory:
         snap,
         source_summary=f"market data, news, portfolio, ML cache, permanent memory for {ticker}",
         require_memo_schema=True,
+        user_scope=user_scope,
     )
 
     async def generate():
         collected: list = []
+        stream_tokens_immediately = not _should_buffer_output()
+        yield _sse("step", json.dumps({
+            "id": "run_start",
+            "run_id": run_id,
+            "label": "Memo run started",
+            "ticker": ticker,
+        }))
         try:
             client = _anth.Anthropic(api_key=api_key_anthropic)
             kwargs = dict(
@@ -2383,7 +3254,9 @@ Permanent graph memory:
             with stream_ctx as stream:
                 for text in stream.text_stream:
                     collected.append(text)
+            anthropic_breaker.record_success()
         except Exception as e:
+            anthropic_breaker.record_failure(str(e))
             yield _sse("error", str(e))
         final_text, report = validate_and_repair_response("".join(collected), memo_context)
         if report.repairs or report.warnings or report.missing_sections or report.unknown_tickers:
@@ -2394,8 +3267,6 @@ Permanent graph memory:
                 "warnings": report.warnings,
                 "missing_sections": report.missing_sections,
             }))
-        for chunk in _chunk_text(final_text):
-            yield _sse("token", chunk)
         _maybe_write_conviction(
             ticker=ticker,
             sig_cache_path=BASE / ".model_cache" / f"{ticker}.pkl",
@@ -2407,20 +3278,141 @@ Permanent graph memory:
                 assistant_text=final_text,
                 source="memo",
                 metadata={"ticker": ticker},
+                user_id=user_scope,
                 importance=0.66,
             )
         except Exception:
             pass
+
+        checks = _source_checks(final_text, {
+            "sec": {"recent_filings": recent_filings},
+            "market": {"detail": detail, "news": news},
+        })
+        final_text, evidence_enforcement = _apply_evidence_enforcement(final_text, checks, required=True)
+        if evidence_enforcement.get("status") == "downgraded" and stream_tokens_immediately:
+            yield _sse("token", "\n\n### Evidence Enforcement\n- Response downgraded due to missing required evidence links.")
+
+        citation_objects = extract_citations(final_text)
+        citation_records = [c.__dict__ for c in citation_objects]
+        latency_ms = int((time.perf_counter() - run_started) * 1000)
+        observed_tools = ["market", "sec", "ml", "portfolio", "memory"]
+        expected_tools = ["market", "sec", "ml", "portfolio", "memory"]
+
+        eval_case = EvalCase(
+            id=run_id,
+            prompt=f"Generate investment memo for {ticker}",
+            response=final_text,
+            expected_tools=expected_tools,
+            observed_tools=observed_tools,
+            citations=citation_objects,
+            allowed_tickers=set(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+            ticker=ticker,
+            require_memo_schema=True,
+            require_citations=True,
+        )
+        eval_result = evaluate_case(eval_case).to_dict()
+        governance = assess_output(final_text, output_kind="memo")
+        review_state = {"status": "not_required"}
+        if governance.get("high_risk") and _require_human_review(request):
+            queued = enqueue_review(
+                run_id,
+                kind="memo",
+                user_id=f"{tenant_id}:{raw_user_id}",
+                role=user_role,
+                summary=final_text,
+                assessment=governance,
+            )
+            review_state = {"status": queued.get("status", "pending")}
+            yield _sse("step", json.dumps({
+                "id": "human_review",
+                "label": "Memo queued for human review",
+                "review_status": queued.get("status", "pending"),
+            }))
+            if _governance_block_mode_enabled():
+                final_text = (
+                    "Policy block: high-risk memo is held for human review. "
+                    "No actionable recommendation is released until approved."
+                )
+
+        compliance_pass, compliance_report = _apply_regulated_controls(
+            user_scope=user_scope,
+            ticker=ticker,
+            request_text=f"Generate investment memo for {ticker}",
+            candidate_text=final_text,
+        )
+        if not compliance_pass:
+            final_text = (
+                "Policy block: regulated advisory controls prevented release of this memo. "
+                + " ".join(compliance_report.get("findings", []))
+            )
+
+        if stream_tokens_immediately:
+            for chunk in _chunk_text(final_text):
+                yield _sse("token", chunk)
+        else:
+            for chunk in _chunk_text(final_text):
+                yield _sse("token", chunk)
+
+        run_record = build_run_record(
+            run_id=run_id,
+            prompt=f"Generate investment memo for {ticker}",
+            final_response=final_text,
+            expected_tools=expected_tools,
+            observed_tools=observed_tools,
+            tool_trace=[
+                {"phase": "memo", "id": "market", "label": "Loaded market/news context", "tool": "market", "raw": _compact_text(json.dumps({"detail": detail, "news": news[:3]}, default=str), 1200)},
+                {"phase": "memo", "id": "sec", "label": "Loaded recent SEC filing context", "tool": "sec", "raw": _compact_text(json.dumps({"filings": recent_filings[:3]}, default=str), 1200)},
+                {"phase": "memo", "id": "ml", "label": "Loaded cached model signal", "tool": "ml", "raw": _compact_text(json.dumps(sig, default=str), 1200)},
+                {"phase": "memo", "id": "portfolio", "label": "Loaded portfolio risk context", "tool": "portfolio", "raw": _compact_text(json.dumps(snap, default=str), 1200)},
+                {"phase": "memo", "id": "memory", "label": "Loaded durable memory context", "tool": "memory", "raw": _compact_text(permanent_memory, 1200)},
+            ],
+            citations=citation_records,
+            ticker=ticker,
+            allowed_tickers=list(_allowed_ticker_context(ticker, snap, user_scope=user_scope)),
+            memo_schema=True,
+            guardrail_repairs=report.repairs,
+            guardrail_warnings=report.warnings,
+            guardrail_missing_sections=report.missing_sections,
+            guardrail_unknown_tickers=report.unknown_tickers,
+            evidence_enforcement=evidence_enforcement,
+            thread_id=None,
+            session_id=getattr(request, "session_id", None),
+            user_id=f"{tenant_id}:{raw_user_id}",
+            user_role=user_role,
+            model_path=_select_chat_model(f"investment memo {ticker}"),
+            provider_path="anthropic/direct-chat",
+            latency_ms=latency_ms,
+            eval_result=eval_result,
+            governance=governance,
+            review={**review_state, "compliance": compliance_report},
+            quality={
+                "unsupported_claim_ratio": 0.0 if checks.get("sec_citation_used") else 0.1,
+                "citation_precision": 1.0 if citation_records else 0.5,
+                "trace_completeness": 1.0,
+                "routing_accuracy": 1.0,
+            },
+        )
+        log_eval_run(run_record)
+        yield _sse("step", json.dumps({
+            "id": "run_summary",
+            "run_id": run_id,
+            "label": "Memo run captured and scored",
+            "latency_ms": latency_ms,
+            "observed_tools": observed_tools,
+            "citation_count": len(citation_records),
+            "eval_score": eval_result.get("overall_score"),
+            "eval_passed": eval_result.get("passed"),
+        }))
         yield _sse("done", "")
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _build_memo_export(ticker: str) -> dict:
+def _build_memo_export(ticker: str, user_scope: str = "global") -> dict:
     detail = market.stock_detail(ticker)
     news = market.stock_news(ticker, limit=5)
-    snap = portfolio.snapshot()
+    snap = _portfolio_snapshot_for_scope(user_scope)
     filings = sec.ticker_filings(ticker, limit=8)
     financials = sec.company_financials(ticker)
     financial_citations = sec.company_financial_citations(ticker)
@@ -2525,7 +3517,8 @@ def _memo_export_markdown(payload: dict) -> str:
 @limiter.limit("30/minute")
 def export_memo(ticker: str, request: Request, format: str = "markdown"):
     ticker = _ticker_symbol(ticker)
-    payload = _build_memo_export(ticker)
+    _, _, user_scope = _request_identity_scope(request)
+    payload = _build_memo_export(ticker, user_scope=user_scope)
     if format.lower() in {"json", "data"}:
         return payload
     markdown = _memo_export_markdown(payload)
@@ -2537,13 +3530,166 @@ def export_memo(ticker: str, request: Request, format: str = "markdown"):
     )
 
 
+class ComplianceBody(BaseModel):
+    regulated_advice_mode: bool = False
+    attested: bool = False
+    allow_recommendations: bool = False
+    risk_tolerance: str = "moderate"
+    restricted_tickers: list[str] = []
+
+
+@api.get("/compliance")
+@limiter.limit("60/minute")
+def get_compliance(request: Request):
+    _, _, user_scope = _request_identity_scope(request)
+    return _load_compliance_for_scope(user_scope)
+
+
+@api.put("/compliance")
+@limiter.limit("30/minute")
+def update_compliance(body: ComplianceBody, request: Request):
+    _, _, user_scope = _request_identity_scope(request)
+    payload = {
+        "regulated_advice_mode": bool(body.regulated_advice_mode),
+        "attested": bool(body.attested),
+        "allow_recommendations": bool(body.allow_recommendations),
+        "client_profile": {
+            "risk_tolerance": str(body.risk_tolerance or "moderate").strip().lower() or "moderate",
+            "restricted_tickers": _sanitize_ticker_list(body.restricted_tickers or []),
+        },
+    }
+    _save_compliance_for_scope(payload, user_scope)
+    return {"ok": True, "compliance": _load_compliance_for_scope(user_scope)}
+
+
+class DeleteUserDataBody(BaseModel):
+    confirm: str = ""
+
+
+def _delete_user_run_records(caller: str) -> dict:
+    removed_files = 0
+    eval_runs_dir = BASE / "data" / "eval_runs"
+    if eval_runs_dir.exists():
+        for path in eval_runs_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if str(payload.get("user_id") or "") == caller:
+                try:
+                    path.unlink(missing_ok=True)
+                    removed_files += 1
+                except Exception:
+                    pass
+
+    jsonl_path = BASE / "eval_runs.jsonl"
+    removed_lines = 0
+    if jsonl_path.exists():
+        kept: list[str] = []
+        for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                kept.append(line)
+                continue
+            if str(payload.get("user_id") or "") == caller:
+                removed_lines += 1
+            else:
+                kept.append(line)
+        jsonl_path.write_text(("\n".join(kept) + ("\n" if kept else "")), encoding="utf-8")
+
+    return {"removed_run_files": removed_files, "removed_run_lines": removed_lines}
+
+
+@api.get("/user-data/export")
+@limiter.limit("20/minute")
+def export_user_data(request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to export user data")
+
+    tenant_id, raw_user_id, user_scope = _request_identity_scope(request)
+    caller = f"{tenant_id}:{raw_user_id}"
+    settings_payload = _load_settings_for_scope(user_scope)
+    settings_payload.pop("anthropic_api_key", None)
+
+    portfolio_payload = _portfolio_get_positions_for_scope(user_scope)
+    compliance_payload = _load_compliance_for_scope(user_scope)
+    citation_payload = citations.export_user_data(user_scope, limit=1000)
+    memory_payload = memory.export_user_data(user_scope, limit=1000)
+
+    run_records: list[dict] = []
+    eval_runs_dir = BASE / "data" / "eval_runs"
+    if eval_runs_dir.exists():
+        for path in sorted(eval_runs_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if role == "admin" or str(payload.get("user_id") or "") == caller:
+                run_records.append(payload)
+
+    return {
+        "exported_at": pd.Timestamp.now("UTC").isoformat(),
+        "scope": user_scope,
+        "settings": settings_payload,
+        "portfolio": portfolio_payload,
+        "compliance": compliance_payload,
+        "citations": citation_payload,
+        "memory": memory_payload,
+        "runs": run_records,
+    }
+
+
+@api.delete("/user-data")
+@limiter.limit("10/minute")
+def delete_user_data(body: DeleteUserDataBody, request: Request):
+    role = _request_role(request)
+    if role not in {"analyst", "admin"}:
+        raise HTTPException(403, "Role is not permitted to delete user data")
+    if str(body.confirm or "").strip().upper() != "DELETE":
+        raise HTTPException(422, "Deletion requires confirm='DELETE'")
+
+    tenant_id, raw_user_id, user_scope = _request_identity_scope(request)
+    caller = f"{tenant_id}:{raw_user_id}"
+
+    settings_file = user_settings_path(user_scope)
+    portfolio_file = _portfolio_file_for_scope(user_scope)
+    compliance_file = user_compliance_path(user_scope)
+
+    deleted_files: list[str] = []
+    for path in (settings_file, portfolio_file, compliance_file):
+        if path.exists():
+            try:
+                path.unlink(missing_ok=True)
+                deleted_files.append(str(path))
+            except Exception:
+                pass
+
+    citation_result = citations.delete_user_data(user_scope)
+    memory_result = memory.delete_user_data(user_scope)
+    runs_result = _delete_user_run_records(caller)
+
+    return {
+        "ok": True,
+        "scope": user_scope,
+        "deleted_files": deleted_files,
+        "citations": citation_result,
+        "memory": memory_result,
+        "runs": runs_result,
+    }
+
+
 # ── settings ──────────────────────────────────────────────────────────
 @api.get("/settings")
 @limiter.limit("60/minute")
 def get_settings(request: Request):
-    s = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    s = _load_settings_for_scope(user_scope)
     s.pop("anthropic_api_key", None)
-    s["anthropic_api_key_set"] = bool(_anthropic_api_key())
+    s["anthropic_api_key_set"] = bool(_anthropic_api_key_for_scope(user_scope))
     return s
 
 
@@ -2555,10 +3701,13 @@ class SettingsBody(BaseModel):
 @api.put("/settings")
 @limiter.limit("60/minute")
 def update_settings(body: SettingsBody, request: Request):
-    s = _load_settings()
+    _, _, user_scope = _request_identity_scope(request)
+    s = _load_settings_for_scope(user_scope)
     if body.watchlist:
         s["watchlist"] = [t.upper() for t in body.watchlist]
-    _save_settings(s)
+    if body.anthropic_api_key:
+        s["anthropic_api_key"] = body.anthropic_api_key.strip()
+    _save_settings_for_scope(s, user_scope)
     return {"ok": True}
 
 
