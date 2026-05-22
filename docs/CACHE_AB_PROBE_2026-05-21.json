@@ -1,0 +1,69 @@
+{
+  "base": "http://127.0.0.1:9999",
+  "health_route": "/api/health",
+  "cases": [
+    {
+      "tool": "stock_detail",
+      "cold": {
+        "status_code": 200,
+        "elapsed_ms": 866.74
+      },
+      "warm": {
+        "status_code": 200,
+        "elapsed_ms": 8.13
+      },
+      "speedup_percent": 99.06
+    },
+    {
+      "tool": "stock_news",
+      "cold": {
+        "status_code": 200,
+        "elapsed_ms": 271.81,
+        "cache_hit": false,
+        "freshness_state": "fresh",
+        "age_ms": 0
+      },
+      "warm": {
+        "status_code": 200,
+        "elapsed_ms": 15.74,
+        "cache_hit": true,
+        "freshness_state": "fresh",
+        "age_ms": 15
+      },
+      "speedup_percent": 94.21
+    },
+    {
+      "tool": "sec_filings",
+      "cold": {
+        "status_code": 200,
+        "elapsed_ms": 8389.96
+      },
+      "warm": {
+        "status_code": 200,
+        "elapsed_ms": 6.3
+      },
+      "speedup_percent": 99.92
+    },
+    {
+      "tool": "web_citations",
+      "cold": {
+        "status_code": 200,
+        "elapsed_ms": 10.9,
+        "cache_hit": false,
+        "freshness_state": "fresh",
+        "age_ms": 0
+      },
+      "warm": {
+        "status_code": 200,
+        "elapsed_ms": 5.72,
+        "cache_hit": true,
+        "freshness_state": "fresh",
+        "age_ms": 5
+      },
+      "speedup_percent": 47.52
+    }
+  ],
+  "avg_cold_ms": 2384.85,
+  "avg_warm_ms": 8.97,
+  "avg_speedup_percent": 85.18
+}
