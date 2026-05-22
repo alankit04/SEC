@@ -29,15 +29,18 @@ def _safe_float(v) -> "float | None":
 TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
 
 
-def _load() -> dict:
-    if PORTFOLIO_FILE.exists():
-        with open(PORTFOLIO_FILE) as f:
+def _load(portfolio_file: Path | None = None) -> dict:
+    path = Path(portfolio_file or PORTFOLIO_FILE)
+    if path.exists():
+        with open(path) as f:
             return json.load(f)
     return {"positions": []}
 
 
-def _save(data: dict):
-    with open(PORTFOLIO_FILE, "w") as f:
+def _save(data: dict, portfolio_file: Path | None = None):
+    path = Path(portfolio_file or PORTFOLIO_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
 
@@ -84,8 +87,8 @@ class PortfolioManager:
             return pd.Series(dtype=float)
 
     # ------------------------------------------------------------------
-    def snapshot(self) -> dict:
-        data      = _load()
+    def snapshot(self, portfolio_file: Path | None = None) -> dict:
+        data      = _load(portfolio_file)
         positions = data.get("positions", [])
 
         enriched     = []
@@ -207,8 +210,8 @@ class PortfolioManager:
         return round(port_ret, 2)
 
     # ------------------------------------------------------------------
-    def update_positions(self, positions: list):
-        data = _load()
+    def update_positions(self, positions: list, portfolio_file: Path | None = None):
+        data = _load(portfolio_file)
         clean = []
         for pos in positions:
             ticker = str(pos.get("ticker", "")).strip().upper()
@@ -216,7 +219,7 @@ class PortfolioManager:
                 continue
             clean.append({**pos, "ticker": ticker})
         data["positions"] = clean
-        _save(data)
+        _save(data, portfolio_file)
 
-    def get_positions(self) -> list:
-        return _load().get("positions", [])
+    def get_positions(self, portfolio_file: Path | None = None) -> list:
+        return _load(portfolio_file).get("positions", [])
