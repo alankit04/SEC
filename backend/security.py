@@ -15,11 +15,24 @@ import hashlib
 import logging
 import os
 import re
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 logger = logging.getLogger("raphi.security")
+
+try:
+    import jwt
+except Exception:  # pragma: no cover
+    jwt = None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 # ── Public paths that skip auth ──────────────────────────────────────
 PUBLIC_PATHS = {
@@ -68,6 +81,26 @@ class TokenAuth:
         self.app = app
         self._api_key = api_key
         self._internal_token = internal_token  # H1/M3: MCP bridge shared secret
+        self._allow_local_api_bypass = _env_bool("RAPHI_ALLOW_LOCAL_API_BYPASS", False)
+        self._allow_no_api_key = _env_bool("RAPHI_ALLOW_NO_API_KEY", False)
+        self._jwt_secret = os.environ.get("RAPHI_JWT_SECRET", "").strip()
+        self._jwt_alg = os.environ.get("RAPHI_JWT_ALGORITHM", "HS256").strip() or "HS256"
+        self._jwt_aud = os.environ.get("RAPHI_JWT_AUDIENCE", "").strip()
+        self._jwt_iss = os.environ.get("RAPHI_JWT_ISSUER", "").strip()
+        self._require_jwt = _env_bool("RAPHI_REQUIRE_JWT", False)
+
+    def _decode_jwt(self, token: str) -> dict[str, Any]:
+        if jwt is None:
+            raise ValueError("pyjwt is not installed")
+        if not self._jwt_secret:
+            raise ValueError("RAPHI_JWT_SECRET is not configured")
+        options: dict[str, bool] = {"verify_aud": bool(self._jwt_aud), "verify_iss": bool(self._jwt_iss)}
+        kwargs: dict[str, Any] = {"algorithms": [self._jwt_alg], "options": options}
+        if self._jwt_aud:
+            kwargs["audience"] = self._jwt_aud
+        if self._jwt_iss:
+            kwargs["issuer"] = self._jwt_iss
+        return jwt.decode(token, self._jwt_secret, **kwargs)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -85,10 +118,14 @@ class TokenAuth:
             await self.app(scope, receive, send)
             return
 
-        # Local UI mode: allow same-machine API calls without requiring X-API-Key.
-        # This preserves email-only login for localhost while remote clients remain protected.
+        # Optional local UI mode: allow same-machine API calls without requiring X-API-Key.
+        # Disabled by default for secure-by-default deployments.
         client_host = request.client.host if request.client else ""
-        if path.startswith("/api/") and client_host in {"127.0.0.1", "::1", "localhost"}:
+        if (
+            self._allow_local_api_bypass
+            and path.startswith("/api/")
+            and client_host in {"127.0.0.1", "::1", "localhost"}
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -119,9 +156,41 @@ class TokenAuth:
             or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
         )
 
+        bearer = request.headers.get("Authorization", "")
+        bearer_token = bearer.removeprefix("Bearer ").strip() if bearer.startswith("Bearer ") else ""
+        if bearer_token and "." in bearer_token and bearer_token.count(".") == 2:
+            try:
+                claims = self._decode_jwt(bearer_token)
+                scope["raphi_auth"] = {
+                    "auth_type": "jwt",
+                    "sub": str(claims.get("sub") or "").strip(),
+                    "tenant": str(claims.get("tenant") or claims.get("tid") or "local").strip().lower(),
+                    "role": str(claims.get("role") or claims.get("raphi_role") or "analyst").strip().lower(),
+                    "claims": claims,
+                }
+                await self.app(scope, receive, send)
+                return
+            except Exception as exc:
+                if self._require_jwt:
+                    response = Response(
+                        content=f'{{"error": "Unauthorized JWT: {str(exc)[:180]}"}}',
+                        status_code=401,
+                        media_type="application/json",
+                    )
+                    await response(scope, receive, send)
+                    return
+
         if not self._api_key:
-            logger.warning("RAPHI_API_KEY not set — A2A server is UNPROTECTED")
-            await self.app(scope, receive, send)
+            if self._allow_no_api_key:
+                logger.warning("RAPHI_API_KEY not set — allowing request because RAPHI_ALLOW_NO_API_KEY=1")
+                await self.app(scope, receive, send)
+                return
+            response = Response(
+                content='{"error": "Unauthorized. RAPHI_API_KEY is required."}',
+                status_code=401,
+                media_type="application/json",
+            )
+            await response(scope, receive, send)
             return
 
         if not token or token != self._api_key:
@@ -143,6 +212,8 @@ class TokenAuth:
             )
             await response(scope, receive, send)
             return
+
+        scope["raphi_auth"] = {"auth_type": "api_key", "role": "analyst", "tenant": "local", "sub": "api-key-user"}
 
         await self.app(scope, receive, send)
 
