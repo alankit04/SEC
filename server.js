@@ -27,7 +27,7 @@ console.log(`[RAPHI] cwd: ${PROJECT_DIR}`);
 
 const server = spawn(UVICORN, [
   'backend.raphi_server:app',
-  '--host', '0.0.0.0',
+  '--host', '127.0.0.1',
   '--port', '9999',
   '--reload',
 ], {
