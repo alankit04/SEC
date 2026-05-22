@@ -52,4 +52,4 @@ def test_mcp_lists_real_gnn_tools():
     assert {"firecrawl_scrape", "firecrawl_search"}.issubset(names)
     assert "web_citations" in names
     gnn_signal = next(tool for tool in tools if tool.name == "gnn_signal")
-    assert gnn_signal.inputSchema["properties"]["ticker"]["pattern"] == "^[A-Z]{1,5}$"
+    assert gnn_signal.inputSchema["properties"]["ticker"]["pattern"] == "^[A-Z]{1,5}(?:\\.[A-Z])?$"
