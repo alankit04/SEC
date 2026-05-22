@@ -12,6 +12,7 @@ Security fixes applied:
 import json
 import logging
 import os
+from copy import deepcopy
 from pathlib import Path
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -93,6 +94,23 @@ ALLOWED_TOOLS = [
 ]
 _ALLOWED_TOOLS_SET = set(ALLOWED_TOOLS)
 
+ROLE_TOOL_SCOPES = {
+    "viewer": {
+        "mcp__raphi__market_overview",
+        "mcp__raphi__stock_detail",
+        "mcp__raphi__stock_news",
+        "mcp__raphi__sec_filings",
+        "mcp__raphi__sec_search",
+        "mcp__raphi__sec_universe",
+        "mcp__raphi__sec_industries",
+        "mcp__raphi__edgar_live_filings",
+        "mcp__raphi__edgar_search_fulltext",
+        "mcp__raphi__web_citations",
+    },
+    "analyst": _ALLOWED_TOOLS_SET,
+    "admin": _ALLOWED_TOOLS_SET,
+}
+
 SYSTEM_PROMPT = """You are RAPHI (Real-time Agentic Platform for Human Investment Intelligence).
 
 You have specialist subagents (dispatch via Task tool):
@@ -140,6 +158,11 @@ async def _tool_guard(
     )
 
 
+def _role_tool_scope(role: str | None) -> set[str]:
+    normalized = (role or "analyst").strip().lower()
+    return set(ROLE_TOOL_SCOPES.get(normalized, _ALLOWED_TOOLS_SET))
+
+
 # ── H3: Encrypted session store ───────────────────────────────────────
 _cipher = SessionCipher()
 
@@ -183,19 +206,46 @@ def _get_api_key() -> str:
     return os.environ.get("ANTHROPIC_API_KEY", "")
 
 
+def _compact_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 18)].rstrip() + " ...[compacted]"
+
+
+def _memory_scope_user(task_id: str | None) -> str:
+    if task_id:
+        return f"task:{str(task_id)[:96]}"
+    return os.environ.get("RAPHI_MEMORY_USER_ID", "local-user")
+
+
+def _mcp_servers_for_scope(scope_user: str) -> dict[str, McpStdioServerConfig]:
+    servers = deepcopy(MCP_SERVERS)
+    env = dict(servers.get("raphi", {}).get("env") or {})
+    env["RAPHI_CACHE_USER_SCOPE"] = scope_user
+    servers["raphi"]["env"] = env
+    return servers
+
+
 class RaphiAgent:
     """RAPHI agent powered by Claude Agent SDK."""
 
-    async def invoke(self, user_message: str, task_id: str | None = None) -> str:
+    async def invoke(self, user_message: str, task_id: str | None = None, user_role: str = "analyst") -> str:
         response_parts: list[str] = []
-        async for event in self.stream(user_message, task_id=task_id):
+        async for event in self.stream(user_message, task_id=task_id, user_role=user_role):
             if event["event"] == "token":
                 response_parts.append(event["data"])
             elif event["event"] == "error":
                 return event["data"]
         return "".join(response_parts) if response_parts else "Analysis complete."
 
-    async def stream(self, user_message: str, task_id: str | None = None):
+    async def stream(
+        self,
+        user_message: str,
+        task_id: str | None = None,
+        user_role: str = "analyst",
+        compact: bool = False,
+    ):
         """Run the real Claude Agent SDK path and yield browser-friendly events.
 
         The SDK gives structured assistant/result messages rather than guaranteed
@@ -211,9 +261,13 @@ class RaphiAgent:
             return
 
         original_user_message = user_message
+        memory_limit = 3 if compact else 6
+        prompt_limit = 1800 if compact else 3200
+        scope_user = _memory_scope_user(task_id)
+
         try:
-            memories = _graph_memory.retrieve_context(user_message, limit=6)
-            memory_context = _graph_memory.format_context(memories)
+            memories = _graph_memory.retrieve_context(user_message, limit=memory_limit, user_id=scope_user)
+            memory_context = _compact_text(_graph_memory.format_context(memories), 900 if compact else 2200)
         except Exception:
             memory_context = ""
 
@@ -233,6 +287,9 @@ class RaphiAgent:
                 "Use this memory only when it is relevant to the user's request."
             )
 
+        if compact:
+            user_message = _compact_text(user_message, prompt_limit)
+
         resume_id = _session_store.get(task_id) if task_id else None
 
         # API key is optional — Claude CLI uses OAuth session when not set.
@@ -250,12 +307,26 @@ class RaphiAgent:
             }),
         }
 
+        scoped_tools = sorted(_role_tool_scope(user_role) & _ALLOWED_TOOLS_SET)
+
+        async def _scoped_tool_guard(
+            tool_name: str,
+            tool_input: dict,
+            context: ToolPermissionContext,
+        ) -> PermissionResultAllow | PermissionResultDeny:
+            if tool_name in scoped_tools:
+                return PermissionResultAllow()
+            logger.warning("Blocked unapproved or out-of-scope tool request for role %s: %s", user_role, tool_name)
+            return PermissionResultDeny(
+                reason=f"Tool '{tool_name}' is not approved for role '{user_role}'."
+            )
+
         options = ClaudeAgentOptions(
             system_prompt=SYSTEM_PROMPT,
-            mcp_servers=MCP_SERVERS,
-            allowed_tools=ALLOWED_TOOLS,
+            mcp_servers=_mcp_servers_for_scope(scope_user),
+            allowed_tools=scoped_tools,
             permission_mode="acceptEdits",    # C3: was bypassPermissions
-            can_use_tool=_tool_guard,          # C3: hard deny for unlisted tools
+            can_use_tool=_scoped_tool_guard,
             max_turns=5,
             cwd=str(BASE_DIR),
             cli_path=str(CLAUDE_CLI),
@@ -321,6 +392,7 @@ class RaphiAgent:
                 assistant_text=result,
                 source="a2a",
                 metadata={"task_id": task_id},
+                user_id=scope_user,
                 importance=0.62,
             )
         except Exception:
