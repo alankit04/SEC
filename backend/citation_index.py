@@ -139,6 +139,7 @@ class CitationIndex:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS citation_sources (
                         id TEXT PRIMARY KEY,
+                        user_scope TEXT NOT NULL DEFAULT 'global',
                         ticker TEXT NOT NULL DEFAULT '',
                         source_type TEXT NOT NULL,
                         title TEXT NOT NULL DEFAULT '',
@@ -163,6 +164,9 @@ class CitationIndex:
                     "CREATE INDEX IF NOT EXISTS idx_citation_sources_ticker ON citation_sources(ticker)"
                 )
                 cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_citation_sources_scope ON citation_sources(user_scope)"
+                )
+                cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_citation_chunks_source ON citation_chunks(source_id)"
                 )
                 cur.execute("""
@@ -170,6 +174,7 @@ class CitationIndex:
                     ON citation_chunks
                     USING GIN (to_tsvector('english', text))
                 """)
+                cur.execute("ALTER TABLE citation_sources ADD COLUMN IF NOT EXISTS user_scope TEXT NOT NULL DEFAULT 'global'")
             conn.commit()
 
     def _init_sqlite(self) -> None:
@@ -177,6 +182,7 @@ class CitationIndex:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS citation_sources (
                     id TEXT PRIMARY KEY,
+                    user_scope TEXT NOT NULL DEFAULT 'global',
                     ticker TEXT NOT NULL DEFAULT '',
                     source_type TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
@@ -203,6 +209,7 @@ class CitationIndex:
                 USING fts5(
                     chunk_id UNINDEXED,
                     source_id UNINDEXED,
+                    user_scope,
                     ticker,
                     source_type,
                     title,
@@ -210,10 +217,14 @@ class CitationIndex:
                     text
                 )
             """)
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(citation_sources)").fetchall()]
+            if "user_scope" not in cols:
+                conn.execute("ALTER TABLE citation_sources ADD COLUMN user_scope TEXT NOT NULL DEFAULT 'global'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_citation_sources_ticker ON citation_sources(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_citation_sources_scope ON citation_sources(user_scope)")
             conn.commit()
 
-    def add_document(self, doc: CitationDocument | dict) -> dict:
+    def add_document(self, doc: CitationDocument | dict, *, user_scope: str = "global") -> dict:
         if isinstance(doc, dict):
             doc = CitationDocument(**doc)
         text = _clean_text(doc.text)
@@ -226,24 +237,26 @@ class CitationIndex:
         url = str(doc.url or "").strip()
         retrieved_at = doc.retrieved_at or _now_iso()
         metadata = doc.metadata or {}
-        source_id = _stable_id(ticker, source_type, url, title)
+        scope = str(user_scope or "global").strip()[:128] or "global"
+        source_id = _stable_id(scope, ticker, source_type, url, title)
         chunks = chunk_text(text)
         if not chunks:
             return {"inserted_chunks": 0, "skipped": True, "reason": "no chunks"}
 
         if self.backend == "postgres":
             return self._add_document_postgres(
-                source_id, ticker, source_type, title, url, doc.published_at,
+                source_id, scope, ticker, source_type, title, url, doc.published_at,
                 retrieved_at, metadata, chunks
             )
         return self._add_document_sqlite(
-            source_id, ticker, source_type, title, url, doc.published_at,
+            source_id, scope, ticker, source_type, title, url, doc.published_at,
             retrieved_at, metadata, chunks
         )
 
     def _add_document_postgres(
         self,
         source_id: str,
+        user_scope: str,
         ticker: str,
         source_type: str,
         title: str,
@@ -260,9 +273,10 @@ class CitationIndex:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO citation_sources
-                    (id, ticker, source_type, title, url, domain, published_at, retrieved_at, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    (id, user_scope, ticker, source_type, title, url, domain, published_at, retrieved_at, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                     ON CONFLICT (id) DO UPDATE SET
+                        user_scope = EXCLUDED.user_scope,
                         ticker = EXCLUDED.ticker,
                         source_type = EXCLUDED.source_type,
                         title = EXCLUDED.title,
@@ -271,7 +285,7 @@ class CitationIndex:
                         published_at = EXCLUDED.published_at,
                         retrieved_at = EXCLUDED.retrieved_at,
                         metadata = EXCLUDED.metadata
-                """, (source_id, ticker, source_type, title, url, _domain(url), published_at or "", retrieved_at, json.dumps(metadata)))
+                """, (source_id, user_scope, ticker, source_type, title, url, _domain(url), published_at or "", retrieved_at, json.dumps(metadata)))
                 for idx, chunk in enumerate(chunks):
                     chunk_id = _stable_id(source_id, idx, chunk)
                     cur.execute("""
@@ -287,6 +301,7 @@ class CitationIndex:
     def _add_document_sqlite(
         self,
         source_id: str,
+        user_scope: str,
         ticker: str,
         source_type: str,
         title: str,
@@ -302,9 +317,10 @@ class CitationIndex:
         with self._sqlite_conn() as conn:
             conn.execute("""
                 INSERT INTO citation_sources
-                (id, ticker, source_type, title, url, domain, published_at, retrieved_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, user_scope, ticker, source_type, title, url, domain, published_at, retrieved_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    user_scope=excluded.user_scope,
                     ticker=excluded.ticker,
                     source_type=excluded.source_type,
                     title=excluded.title,
@@ -313,7 +329,7 @@ class CitationIndex:
                     published_at=excluded.published_at,
                     retrieved_at=excluded.retrieved_at,
                     metadata=excluded.metadata
-            """, (source_id, ticker, source_type, title, url, _domain(url), published_at or "", retrieved_at, json.dumps(metadata)))
+            """, (source_id, user_scope, ticker, source_type, title, url, _domain(url), published_at or "", retrieved_at, json.dumps(metadata)))
             for idx, chunk in enumerate(chunks):
                 chunk_id = _stable_id(source_id, idx, chunk)
                 try:
@@ -324,9 +340,9 @@ class CitationIndex:
                     """, (chunk_id, source_id, idx, chunk, len(chunk.split()), _content_hash(chunk)))
                     conn.execute("""
                         INSERT INTO citation_fts
-                        (chunk_id, source_id, ticker, source_type, title, url, text)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (chunk_id, source_id, ticker, source_type, title, url, chunk))
+                        (chunk_id, source_id, user_scope, ticker, source_type, title, url, text)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (chunk_id, source_id, user_scope, ticker, source_type, title, url, chunk))
                     inserted += 1
                 except sqlite3.IntegrityError:
                     continue
@@ -337,6 +353,7 @@ class CitationIndex:
         self,
         query: str,
         *,
+        user_scope: str = "global",
         ticker: str = "",
         source_type: str = "",
         limit: int = 5,
@@ -344,13 +361,14 @@ class CitationIndex:
         clean_query = " ".join(str(query or "").split())[:500]
         ticker = str(ticker or "").upper().strip()
         source_type = str(source_type or "").strip()
+        scope = str(user_scope or "global").strip()[:128] or "global"
         limit = min(max(int(limit or 5), 1), 20)
         if not clean_query:
             return {"query": clean_query, "ticker": ticker, "results": [], "count": 0, "backend": self.backend}
         if self.backend == "postgres":
-            rows = self._search_postgres(clean_query, ticker=ticker, source_type=source_type, limit=limit)
+            rows = self._search_postgres(clean_query, user_scope=scope, ticker=ticker, source_type=source_type, limit=limit)
         else:
-            rows = self._search_sqlite(clean_query, ticker=ticker, source_type=source_type, limit=limit)
+            rows = self._search_sqlite(clean_query, user_scope=scope, ticker=ticker, source_type=source_type, limit=limit)
         results = []
         for idx, row in enumerate(rows, start=1):
             text = row.get("text", "")
@@ -369,6 +387,7 @@ class CitationIndex:
         return {
             "provider": "local_citation_index",
             "query": clean_query,
+            "user_scope": scope,
             "ticker": ticker,
             "backend": self.backend,
             "results": results,
@@ -376,9 +395,11 @@ class CitationIndex:
             "retrieved_at": _now_iso(),
         }
 
-    def _search_postgres(self, query: str, *, ticker: str, source_type: str, limit: int) -> list[dict]:
+    def _search_postgres(self, query: str, *, user_scope: str, ticker: str, source_type: str, limit: int) -> list[dict]:
         clauses = ["to_tsvector('english', c.text) @@ plainto_tsquery('english', %s)"]
         where_params: list[Any] = [query]
+        clauses.append("s.user_scope = %s")
+        where_params.append(user_scope)
         if ticker:
             clauses.append("s.ticker = %s")
             where_params.append(ticker)
@@ -406,10 +427,12 @@ class CitationIndex:
                 cur.execute(sql, params)
                 return list(cur.fetchall())
 
-    def _search_sqlite(self, query: str, *, ticker: str, source_type: str, limit: int) -> list[dict]:
+    def _search_sqlite(self, query: str, *, user_scope: str, ticker: str, source_type: str, limit: int) -> list[dict]:
         terms = " OR ".join(re.findall(r"[A-Za-z0-9]{3,}", query)) or query
         clauses = ["citation_fts MATCH ?"]
         params: list[Any] = [terms]
+        clauses.append("f.user_scope = ?")
+        params.append(user_scope)
         if ticker:
             clauses.append("f.ticker = ?")
             params.append(ticker)
@@ -435,7 +458,7 @@ class CitationIndex:
         with self._sqlite_conn() as conn:
             return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
-    def ingest_sec_ticker(self, sec_reader, ticker: str, *, limit_filings: int = 8) -> dict:
+    def ingest_sec_ticker(self, sec_reader, ticker: str, *, user_scope: str = "global", limit_filings: int = 8) -> dict:
         ticker = str(ticker or "").upper().strip()
         inserted_docs = 0
         inserted_chunks = 0
@@ -461,7 +484,7 @@ class CitationIndex:
                 text=text,
                 published_at=filing.get("filed") or citation.get("filed") or "",
                 metadata={"citation": citation, "accession": accession, "form": form},
-            ))
+            ), user_scope=user_scope)
             inserted_docs += 1
             inserted_chunks += int(added.get("inserted_chunks", 0))
 
@@ -490,7 +513,7 @@ class CitationIndex:
                 text=text,
                 published_at=entry.get("filed") or citation.get("filed") or "",
                 metadata={"citation": citation, "metric": metric, "tag": entry.get("tag")},
-            ))
+            ), user_scope=user_scope)
             inserted_docs += 1
             inserted_chunks += int(added.get("inserted_chunks", 0))
 
@@ -501,7 +524,7 @@ class CitationIndex:
             "backend": self.backend,
         }
 
-    def refresh_from_firecrawl(self, query: str, *, ticker: str = "", limit: int = 3) -> dict:
+    def refresh_from_firecrawl(self, query: str, *, user_scope: str = "global", ticker: str = "", limit: int = 3) -> dict:
         if not firecrawl_client.is_available():
             return {
                 "available": False,
@@ -527,7 +550,7 @@ class CitationIndex:
                 url=item.get("url", ""),
                 text=text,
                 metadata={"query": query, "description": item.get("description", "")},
-            ))
+            ), user_scope=user_scope)
             ingested += 1
             inserted_chunks += int(added.get("inserted_chunks", 0))
         return {
@@ -541,19 +564,80 @@ class CitationIndex:
         self,
         query: str,
         *,
+        user_scope: str = "global",
         ticker: str = "",
         limit: int = 5,
         refresh_if_missing: bool = False,
         min_results: int = 2,
     ) -> dict:
-        first = self.search(query, ticker=ticker, limit=limit)
+        first = self.search(query, user_scope=user_scope, ticker=ticker, limit=limit)
         if not refresh_if_missing or first.get("count", 0) >= min_results:
             first["refresh"] = {"attempted": False}
             return first
-        refresh = self.refresh_from_firecrawl(query, ticker=ticker, limit=max(min_results, 3))
-        second = self.search(query, ticker=ticker, limit=limit)
+        refresh = self.refresh_from_firecrawl(query, user_scope=user_scope, ticker=ticker, limit=max(min_results, 3))
+        second = self.search(query, user_scope=user_scope, ticker=ticker, limit=limit)
         second["refresh"] = {"attempted": True, **refresh}
         return second
+
+    def export_user_data(self, user_scope: str, *, limit: int = 500) -> dict:
+        scope = str(user_scope or "global").strip()[:128] or "global"
+        limit = min(max(int(limit), 1), 5000)
+        if self.backend == "postgres":
+            with self._pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT s.id, s.user_scope, s.ticker, s.source_type, s.title, s.url, s.retrieved_at, c.text
+                        FROM citation_sources s
+                        JOIN citation_chunks c ON c.source_id = s.id
+                        WHERE s.user_scope = %s
+                        ORDER BY s.retrieved_at DESC
+                        LIMIT %s
+                        """,
+                        (scope, limit),
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+        else:
+            with self._sqlite_conn() as conn:
+                rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        """
+                        SELECT s.id, s.user_scope, s.ticker, s.source_type, s.title, s.url, s.retrieved_at, c.text
+                        FROM citation_sources s
+                        JOIN citation_chunks c ON c.source_id = s.id
+                        WHERE s.user_scope = ?
+                        ORDER BY s.retrieved_at DESC
+                        LIMIT ?
+                        """,
+                        (scope, limit),
+                    ).fetchall()
+                ]
+        return {"user_scope": scope, "records": rows, "count": len(rows)}
+
+    def delete_user_data(self, user_scope: str) -> dict:
+        scope = str(user_scope or "global").strip()[:128] or "global"
+        if self.backend == "postgres":
+            with self._pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM citation_sources WHERE user_scope = %s", (scope,))
+                    ids = [row[0] for row in cur.fetchall()]
+                    if ids:
+                        cur.execute("DELETE FROM citation_chunks WHERE source_id = ANY(%s)", (ids,))
+                        cur.execute("DELETE FROM citation_sources WHERE id = ANY(%s)", (ids,))
+                    deleted = len(ids)
+                conn.commit()
+        else:
+            with self._sqlite_conn() as conn:
+                ids = [r[0] for r in conn.execute("SELECT id FROM citation_sources WHERE user_scope = ?", (scope,)).fetchall()]
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    conn.execute(f"DELETE FROM citation_chunks WHERE source_id IN ({placeholders})", ids)
+                    conn.execute(f"DELETE FROM citation_fts WHERE source_id IN ({placeholders})", ids)
+                    conn.execute(f"DELETE FROM citation_sources WHERE id IN ({placeholders})", ids)
+                conn.commit()
+                deleted = len(ids)
+        return {"user_scope": scope, "deleted_sources": deleted}
 
     def status(self) -> dict:
         if self.backend == "postgres":
