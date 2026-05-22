@@ -9,9 +9,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
 
 os.environ.pop("RAPHI_API_KEY", None)
 os.environ.pop("SENTRY_DSN", None)
+os.environ["RAPHI_API_KEY"] = "test-key"
 
 import raphi_server
 from citation_index import CitationDocument, CitationIndex
+
+
+API_HEADERS = {
+    "X-API-Key": "test-key",
+    "X-User-Id": "unit-test-user",
+    "X-Tenant-Id": "unit",
+}
 
 
 class FakeMarket:
@@ -52,7 +60,7 @@ def test_stock_detail_endpoint_serializes_nan_chart_values(monkeypatch):
     monkeypatch.setattr(raphi_server, "market", NaNMarket())
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/stock/AAPL")
+    response = client.get("/api/stock/AAPL", headers=API_HEADERS)
 
     assert response.status_code == 200
     assert response.json()["chart"][0]["open"] is None
@@ -76,7 +84,7 @@ def test_stock_technicals_endpoint_computes_real_indicators(monkeypatch):
     monkeypatch.setattr(raphi_server, "market", FakeMarket())
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/stock/NVDA/technicals")
+    response = client.get("/api/stock/NVDA/technicals", headers=API_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
@@ -89,7 +97,7 @@ def test_cross_asset_signals_are_generated_from_prices(monkeypatch):
     monkeypatch.setattr(raphi_server, "market", FakeMarket())
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/cross-asset/signals?asset_class=crypto")
+    response = client.get("/api/cross-asset/signals?asset_class=crypto", headers=API_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
@@ -105,7 +113,7 @@ def test_portfolio_position_upsert_filters_invalid_saved_rows(monkeypatch):
     monkeypatch.setattr(raphi_server, "portfolio", fake_portfolio)
     client = TestClient(raphi_server.app)
 
-    response = client.post("/api/portfolio/positions", json={"ticker": "nvda", "shares": 2})
+    response = client.post("/api/portfolio/positions", headers=API_HEADERS, json={"ticker": "nvda", "shares": 2})
 
     assert response.status_code == 200
     assert fake_portfolio.positions == [
@@ -117,7 +125,7 @@ def test_memo_export_markdown_contains_sec_citations(monkeypatch):
     monkeypatch.setattr(
         raphi_server,
         "_build_memo_export",
-        lambda ticker: {
+        lambda ticker, user_scope="global": {
             "ticker": ticker,
             "exported_at": "2026-05-19T00:00:00Z",
             "recommendation": "HOLD",
@@ -146,7 +154,7 @@ def test_memo_export_markdown_contains_sec_citations(monkeypatch):
     )
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/memo/NVDA/export")
+    response = client.get("/api/memo/NVDA/export", headers=API_HEADERS)
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/markdown")
@@ -158,7 +166,7 @@ def test_memo_export_markdown_contains_sec_citations(monkeypatch):
 def test_model_optimization_status_endpoint_reports_real_surfaces():
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/models/optimization")
+    response = client.get("/api/models/optimization", headers=API_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
@@ -169,7 +177,7 @@ def test_model_optimization_status_endpoint_reports_real_surfaces():
 def test_stock_optimization_endpoint_reports_policy_and_cached_artifact_state():
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/stock/NVDA/optimization")
+    response = client.get("/api/stock/NVDA/optimization", headers=API_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
@@ -187,11 +195,11 @@ def test_citations_search_endpoint_uses_local_index(monkeypatch, tmp_path):
         title="ASST 8-K Merger Filing",
         url="https://www.sec.gov/Archives/edgar/data/123/000123/",
         text="ASST Strive merger citation from SEC filing evidence.",
-    ))
+    ), user_scope="local:api-key-user")
     monkeypatch.setattr(raphi_server, "citations", idx)
     client = TestClient(raphi_server.app)
 
-    response = client.get("/api/citations/search?q=Strive merger&ticker=ASST")
+    response = client.get("/api/citations/search?q=Strive merger&ticker=ASST", headers=API_HEADERS)
 
     assert response.status_code == 200
     data = response.json()
