@@ -2335,10 +2335,21 @@ function manualRefresh() {
 
 // ── LAYER 5: Backend rate limiter — handled server-side (slowapi 60/min · 5/min AI)
 
+function identityHeaders() {
+  const rawUser = (localStorage.getItem('raphi_user') || '').trim().toLowerCase();
+  const userId = rawUser.replace(/[^a-z0-9_.:@+-]/g, '_').slice(0, 128);
+  const rawTenant = (localStorage.getItem('raphi_tenant') || 'local').trim().toLowerCase();
+  const tenantId = rawTenant.replace(/[^a-z0-9_.:@+-]/g, '_').slice(0, 128) || 'local';
+  return {
+    ...(userId ? { 'X-User-Id': userId } : {}),
+    'X-Tenant-Id': tenantId,
+  };
+}
+
 // ── LAYER 6: apiFetch (wraps fetch with auth + CB + abort) ────────────
 async function apiFetch(path, opts = {}) {
   const key = localStorage.getItem('raphi_api_key') || '';
-  const headers = { 'X-API-Key': key, ...(opts.headers || {}) };
+  const headers = { 'X-API-Key': key, ...identityHeaders(), ...(opts.headers || {}) };
   const signal = opts.signal || (_pageController ? _pageController.signal : undefined);
   try {
     const r = await fetch(API_BASE + path, { ...opts, headers, signal });
@@ -3543,7 +3554,7 @@ async function fetchSSEMemo(ticker, outputEl, btn) {
     const key = localStorage.getItem('raphi_api_key') || '';
     const r = await fetch(`${API_BASE}/api/memo/${ticker}`, {
       method: 'POST',
-      headers: { 'X-API-Key': key }
+      headers: { 'X-API-Key': key, ...identityHeaders() }
     });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
@@ -3937,6 +3948,61 @@ function renderProfessionalResponse(raw) {
     .replace(/^<\/div>/, '') + '</div>';
 }
 
+function renderTracePanel(state) {
+  const run = state.runId ? `<div><strong>Run:</strong> ${escapeHtml(state.runId)}</div>` : '';
+  const tools = state.tools.size
+    ? `<div><strong>Tools:</strong> ${Array.from(state.tools).map(escapeHtml).join(', ')}</div>`
+    : `<div><strong>Tools:</strong> none observed yet</div>`;
+  const plan = state.plan.length
+    ? `<ul style="margin:6px 0 0 18px;">${state.plan.slice(0, 8).map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul>`
+    : '<div>Plan pending…</div>';
+  const guardrails = state.guardrails.length
+    ? `<div><strong>Guardrails:</strong> ${escapeHtml(state.guardrails.join('; '))}</div>`
+    : '';
+  const evalLine = state.evalScore != null
+    ? `<div><strong>Eval:</strong> ${state.evalPassed ? 'pass' : 'fail'} (${state.evalScore})${state.latencyMs != null ? ` · ${state.latencyMs}ms` : ''}</div>`
+    : '';
+  return `
+    <div class="card" style="margin-bottom:10px;padding:10px 12px;background:var(--bg-secondary);border:1px solid var(--border);">
+      <div style="font-weight:700;font-size:12px;margin-bottom:6px;color:var(--text-secondary);">RUN TRACE</div>
+      ${run}
+      ${tools}
+      ${guardrails}
+      ${evalLine}
+      ${state.runId ? `<div style="margin-top:6px;"><button class="btn-outline btn-sm" onclick="toggleRunTraceDetail('${escapeHtml(state.runId)}')">Toggle Raw Run Detail</button></div>` : ''}
+      ${state.detailHtml || ''}
+      <div style="margin-top:6px;"><strong>Plan:</strong>${plan}</div>
+    </div>
+  `;
+}
+
+async function loadRunTraceDetail(runId) {
+  try {
+    const r = await apiFetch(`/api/runs/${encodeURIComponent(runId)}`);
+    return await r.json();
+  } catch (e) {
+    return { error: e.message || 'Unable to load run detail' };
+  }
+}
+
+window.toggleRunTraceDetail = async function(runId) {
+  const target = document.querySelector('#consoleMessages .msg-ai:last-child .response-body');
+  if (!target) return;
+  const state = window.__raphiTraceState || {};
+  if (target.dataset.showRunDetail === runId) {
+    target.dataset.showRunDetail = '';
+    state.detailHtml = '';
+    target.innerHTML = `${renderTracePanel(state)}${renderProfessionalResponse(window.__raphiTraceText || '')}`;
+    return;
+  }
+  const detail = await loadRunTraceDetail(runId);
+  const pretty = escapeHtml(JSON.stringify(detail, null, 2));
+  state.detailHtml = `<details open style="margin-top:6px;"><summary style="cursor:pointer;">Raw run record</summary><pre style="white-space:pre-wrap;max-height:280px;overflow:auto;font-size:11px;margin-top:6px;">${pretty}</pre></details>`;
+  window.__raphiTraceState = state;
+  target.dataset.showRunDetail = runId;
+  target.innerHTML = `${renderTracePanel(state)}${renderProfessionalResponse(window.__raphiTraceText || '')}`;
+};
+
 async function sendChat() {
   if (chatLocked) return;
   const input = document.querySelector('.console-input');
@@ -3980,7 +4046,7 @@ async function sendChat() {
 
     const r = await fetch(`${API_BASE}/api/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': key },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': key, ...identityHeaders() },
       body: JSON.stringify({ message: val, history: historyForRequest, ticker, thread_id: requestThreadId, agentic: true }),
       signal: controller.signal,
     });
@@ -3994,7 +4060,19 @@ async function sendChat() {
     messages.scrollTop = messages.scrollHeight;
 
     const responseEl = aiMsg.querySelector('.response-body');
+    const traceState = {
+      runId: null,
+      plan: [],
+      tools: new Set(),
+      guardrails: [],
+      evalScore: null,
+      evalPassed: null,
+      latencyMs: null,
+      detailHtml: '',
+    };
     let fullText = '';
+    window.__raphiTraceState = traceState;
+    window.__raphiTraceText = fullText;
 
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
@@ -4024,7 +4102,32 @@ async function sendChat() {
               break;
             }
             fullText += data;
-            if (responseEl) responseEl.innerHTML = renderProfessionalResponse(fullText);
+            window.__raphiTraceText = fullText;
+            const traceHtml = renderTracePanel(traceState);
+            if (responseEl) responseEl.innerHTML = `${traceHtml}${renderProfessionalResponse(fullText)}`;
+            messages.scrollTop = messages.scrollHeight;
+          } else if (curEvent === 'step') {
+            let stepPayload = data;
+            if (typeof stepPayload === 'string') {
+              try { stepPayload = JSON.parse(stepPayload); } catch(e) { stepPayload = { label: stepPayload }; }
+            }
+            if (stepPayload?.run_id) traceState.runId = stepPayload.run_id;
+            if (stepPayload?.id?.startsWith?.('plan_') && stepPayload?.label) {
+              traceState.plan.push(stepPayload.label);
+            }
+            if (stepPayload?.id === 'guardrails') {
+              const parts = [];
+              if (Array.isArray(stepPayload.repairs) && stepPayload.repairs.length) parts.push(`repairs: ${stepPayload.repairs.length}`);
+              if (Array.isArray(stepPayload.warnings) && stepPayload.warnings.length) parts.push(`warnings: ${stepPayload.warnings.length}`);
+              if (parts.length) traceState.guardrails.push(parts.join(', '));
+            }
+            if (Array.isArray(stepPayload?.observed_tools)) {
+              stepPayload.observed_tools.forEach(t => traceState.tools.add(String(t)));
+            }
+            if (stepPayload?.eval_score != null) traceState.evalScore = stepPayload.eval_score;
+            if (stepPayload?.eval_passed != null) traceState.evalPassed = !!stepPayload.eval_passed;
+            if (stepPayload?.latency_ms != null) traceState.latencyMs = stepPayload.latency_ms;
+            if (responseEl) responseEl.innerHTML = `${renderTracePanel(traceState)}${renderProfessionalResponse(fullText)}`;
             messages.scrollTop = messages.scrollHeight;
           } else if (curEvent === 'done') {
             if (requestToken === activeChatRequestToken && requestThreadId === chatThreadId) {
