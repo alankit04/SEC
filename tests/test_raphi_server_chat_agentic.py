@@ -20,6 +20,11 @@ CHAT_HEADERS = {
     "X-Tenant-Id": "unit",
 }
 
+ACTION_HEADERS = {
+    **CHAT_HEADERS,
+    "X-Action-Approval": "approved",
+}
+
 
 class FakeAgent:
     def __init__(self):
@@ -195,6 +200,82 @@ def test_chat_fallback_runs_local_specialist_context(monkeypatch):
     assert fake_memory.last["metadata"]["agentic"] is False
 
 
+def test_chat_retry_loop_replans_and_passes_on_second_attempt(monkeypatch):
+    fake_agent = FakeAgent()
+    monkeypatch.setattr(raphi_server, "_agent", fake_agent)
+    monkeypatch.setattr(raphi_server, "memory", FakeMemory())
+    monkeypatch.setattr(raphi_server, "market", FakeMarket())
+    monkeypatch.setattr(raphi_server, "portfolio", FakePortfolio())
+    monkeypatch.setattr(raphi_server, "_anthropic_api_key", lambda: "sk-test")
+    monkeypatch.setenv("RAPHI_CHAT_MAX_RETRIES", "1")
+
+    monkeypatch.setattr(
+        raphi_server,
+        "_collect_local_agent_context",
+        lambda **kwargs: {
+            "market": {"detail": {"price": 100}, "news": []},
+            "sec": {"recent_filings": [{"form": "10-K", "filed": "20260101"}]},
+            "ml_signal": {"available": False},
+            "gnn": {"status": {"trained": True, "graph_nodes": 7, "graph_edges": 9}},
+            "portfolio": {},
+        },
+    )
+    monkeypatch.setattr(raphi_server, "_format_local_agent_context", lambda ctx: "@sec-researcher\n- 10-K filed 20260101")
+
+    async def fake_direct_stream(**kwargs):
+        yield raphi_server._sse("step", '{"id":"direct_llm","label":"retry direct"}')
+        yield raphi_server._sse("token", "SECOND TRY PASS")
+
+    monkeypatch.setattr(raphi_server, "_stream_direct_anthropic_chat", fake_direct_stream)
+
+    eval_results = iter([
+        {
+            "overall_score": 0.2,
+            "passed": False,
+            "metrics": {
+                "tool_routing_accuracy": {
+                    "passed": False,
+                    "details": {"missing_tools": ["citation"]},
+                },
+                "citation_precision": {"passed": False},
+            },
+        },
+        {
+            "overall_score": 0.92,
+            "passed": True,
+            "metrics": {
+                "tool_routing_accuracy": {
+                    "passed": True,
+                    "details": {"missing_tools": []},
+                },
+                "citation_precision": {"passed": True},
+            },
+        },
+    ])
+
+    class _EvalWrap:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self):
+            return self._payload
+
+    monkeypatch.setattr(raphi_server, "evaluate_case", lambda case: _EvalWrap(next(eval_results)))
+
+    client = TestClient(raphi_server.app)
+    response = client.post(
+        "/api/chat",
+        headers=CHAT_HEADERS,
+        json={"message": "Write a memo for NVDA", "ticker": "NVDA", "thread_id": "retry-thread", "agentic": True},
+    )
+
+    body = response.text
+    assert response.status_code == 200
+    assert "retry_decision" in body
+    assert "SECOND TRY PASS" in body
+    assert '"attempts_used": 2' in body
+
+
 def test_sse_token_preserves_newlines_as_json_payload():
     payload = raphi_server._sse("token", "Line one\nLine two")
 
@@ -236,6 +317,42 @@ def test_common_words_do_not_become_tickers():
     assert raphi_server._extract_ticker_from_text("show me the portfolio risk") is None
 
 
+def test_company_name_resolves_to_ticker_for_chat(monkeypatch):
+    monkeypatch.setattr(
+        raphi_server,
+        "_COMPANY_NAME_LOOKUP",
+        {
+            "apple": "AAPL",
+            "nvidia": "NVDA",
+            "alphabet": "GOOGL",
+        },
+    )
+
+    resolved = raphi_server._resolve_chat_ticker(
+        raphi_server.ChatRequest(
+            message="what do you think about apple right now",
+            history=[],
+            ticker="TSLA",
+        )
+    )
+
+    assert resolved == "AAPL"
+
+
+def test_company_name_resolves_from_history(monkeypatch):
+    monkeypatch.setattr(raphi_server, "_COMPANY_NAME_LOOKUP", {"nvidia": "NVDA"})
+
+    resolved = raphi_server._resolve_chat_ticker(
+        raphi_server.ChatRequest(
+            message="yes continue",
+            history=[{"role": "user", "content": "please analyze nvidia"}],
+            ticker="TSLA",
+        )
+    )
+
+    assert resolved == "NVDA"
+
+
 def test_agentic_plan_includes_reasoning_tool_memory_and_reflection_steps():
     plan = raphi_server._agentic_plan(
         "Analyze ASST using price performance, SEC filings, ML/GNN signal, and portfolio risk.",
@@ -248,6 +365,103 @@ def test_agentic_plan_includes_reasoning_tool_memory_and_reflection_steps():
     assert "cached ML signal" in labels
     assert "Retrieve episodic memory" in labels
     assert "Reflect on missing sources" in labels
+
+
+def test_strict_quality_gate_blocks_missing_conflict_reasoning():
+    gate = raphi_server._strict_quality_gate(
+        message="Compare ML and GNN stance for NVDA",
+        candidate_response="ML is bullish while GNN is bearish.",
+        checks={"web_citations_available": False, "sec_citation_available": False},
+        eval_result={"metrics": {"citation_precision": {"passed": True}, "unsupported_claim_rate": {"passed": True}}},
+        require_evidence=False,
+    )
+
+    assert gate["passed"] is False
+    assert "ML/GNN conflict reasoning gate failed" in gate["violations"]
+
+
+def test_run_record_detail_is_sanitized_by_default(monkeypatch):
+    fake_record = {
+        "run_id": "run_123",
+        "timestamp": "2026-05-22T00:00:00Z",
+        "thread_id": "thread-1",
+        "ticker": "NVDA",
+        "user_id": "local:api-key-user",
+        "latency_ms": 321,
+        "prompt": "sensitive prompt",
+        "final_response": "sensitive final",
+        "tool_trace": [{"phase": "plan", "id": "plan", "label": "secret", "raw": "secret raw"}],
+        "observed_tools": ["market", "sec"],
+        "citations": [{"url": "https://www.sec.gov"}],
+        "eval_result": {"overall_score": 0.91, "passed": True},
+        "review": {"status": "not_required", "attempts": 1},
+    }
+    monkeypatch.setattr(raphi_server, "_load_run_record", lambda run_id: fake_record)
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/runs/run_123", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run_id"] == "run_123"
+    assert payload["eval"]["passed"] is True
+    assert "prompt" not in payload
+    assert "tool_trace" not in payload
+
+
+def test_run_record_raw_requires_admin(monkeypatch):
+    fake_record = {
+        "run_id": "run_456",
+        "user_id": "local:api-key-user",
+        "prompt": "secret",
+    }
+    monkeypatch.setattr(raphi_server, "_load_run_record", lambda run_id: fake_record)
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/runs/run_456?include_raw=1", headers=CHAT_HEADERS)
+
+    assert response.status_code == 403
+
+
+def test_run_record_raw_allows_admin(monkeypatch):
+    fake_record = {
+        "run_id": "run_789",
+        "user_id": "unit:another-user",
+        "prompt": "secret",
+    }
+    monkeypatch.setattr(raphi_server, "_load_run_record", lambda run_id: fake_record)
+    monkeypatch.setattr(raphi_server, "_request_role", lambda request: "admin")
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/runs/run_789?include_raw=1", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["prompt"] == "secret"
+
+
+def test_tool_trace_is_sanitized_by_default(monkeypatch):
+    fake_record = {
+        "run_id": "run_trace",
+        "user_id": "local:api-key-user",
+        "tool_trace": [
+            {
+                "phase": "attempt_1_agentic",
+                "id": "market",
+                "label": "market step",
+                "tool": "market",
+                "raw": "should not leak",
+            }
+        ],
+    }
+    monkeypatch.setattr(raphi_server, "_load_run_record", lambda run_id: fake_record)
+    client = TestClient(raphi_server.app)
+
+    response = client.get("/api/runs/run_trace/tool-trace", headers=CHAT_HEADERS)
+
+    assert response.status_code == 200
+    trace = response.json()["tool_trace"]
+    assert trace[0]["tool"] == "market"
+    assert "raw" not in trace[0]
 
 
 def test_asst_identity_override_names_current_strive():
@@ -516,7 +730,7 @@ def test_compliance_endpoints_roundtrip(monkeypatch):
 
     put_resp = client.put(
         "/api/compliance",
-        headers=CHAT_HEADERS,
+        headers=ACTION_HEADERS,
         json={
             "regulated_advice_mode": True,
             "attested": True,
@@ -566,10 +780,10 @@ def test_user_data_delete_endpoint_deletes_scoped_files(monkeypatch, tmp_path):
     monkeypatch.setattr(raphi_server, "_delete_user_run_records", lambda caller: {"removed_run_files": 0, "removed_run_lines": 0})
     client = TestClient(raphi_server.app)
 
-    bad = client.request("DELETE", "/api/user-data", headers=CHAT_HEADERS, json={"confirm": "no"})
+    bad = client.request("DELETE", "/api/user-data", headers=ACTION_HEADERS, json={"confirm": "no"})
     assert bad.status_code == 422
 
-    response = client.request("DELETE", "/api/user-data", headers=CHAT_HEADERS, json={"confirm": "DELETE"})
+    response = client.request("DELETE", "/api/user-data", headers=ACTION_HEADERS, json={"confirm": "DELETE"})
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
