@@ -5,30 +5,72 @@ Security fixes applied:
   C2  TokenAuth middleware — X-API-Key required (set RAPHI_API_KEY env var)
   C4  CORS locked to localhost origins only
   C4  Binds to 127.0.0.1 (not 0.0.0.0)
-  Sentry  init_sentry() called at startup
+  Tasks persisted to .raphi_audit/tasks.json (JsonFileTaskStore)
 
 Run:
     export RAPHI_API_KEY=your-secret-key
-    export SENTRY_DSN=https://xxx@o0.ingest.sentry.io/yyy   # from raphi.sentry.io
     cd "/Users/alan/Desktop/SEC Data"
     .venv/bin/python -m backend.a2a_server
 """
 
+import asyncio
+import json
+import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from starlette.middleware.cors import CORSMiddleware
 
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks import TaskStore
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentSkill,
+    Task,
 )
+
+logger = logging.getLogger("raphi.a2a_server")
+
+
+# ── Fix 1: JSON-file-backed task store (replaces InMemoryTaskStore) ───
+class JsonFileTaskStore(TaskStore):
+    """Persists A2A tasks as JSON so state survives server restarts."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
+        self._lock = asyncio.Lock()
+        self._data: dict[str, dict] = {}
+        if path.exists():
+            try:
+                self._data = json.loads(path.read_text())
+            except Exception:
+                logger.warning("JsonFileTaskStore: could not load %s — starting fresh", path)
+
+    async def save(self, task: Task, context: Any = None) -> None:
+        async with self._lock:
+            self._data[task.id] = task.model_dump(mode="json")
+            self._path.write_text(json.dumps(self._data))
+
+    async def get(self, task_id: str, context: Any = None) -> Task | None:
+        async with self._lock:
+            raw = self._data.get(task_id)
+        if raw is None:
+            return None
+        try:
+            return Task.model_validate(raw)
+        except Exception:
+            return None
+
+    async def delete(self, task_id: str, context: Any = None) -> None:
+        async with self._lock:
+            self._data.pop(task_id, None)
+            self._path.write_text(json.dumps(self._data))
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -77,8 +119,8 @@ sec_skill = AgentSkill(
 ml_skill = AgentSkill(
     id="ml_signals",
     name="ML Trading Signals",
-    description="XGBoost + LSTM ensemble predictions with confidence scores and SHAP feature explainability.",
-    tags=["ml", "signals", "predictions", "xgboost", "lstm"],
+    description="XGBoost + GB ensemble predictions with confidence scores and SHAP feature explainability.",
+    tags=["ml", "signals", "predictions", "xgboost", "gradient-boosting"],
     examples=[
         "Generate a trading signal for MSFT",
         "What's the ML prediction for GOOGL?",
@@ -114,14 +156,14 @@ agent_card = AgentCard(
     name="RAPHI",
     description=(
         "AI-powered institutional financial analysis platform with real-time market data, "
-        "SEC EDGAR filings (9,457+ companies), ML trading signals (XGBoost + LSTM), "
+        "SEC EDGAR filings (9,457+ companies), ML trading signals (XGBoost + GB ensemble), "
         "and portfolio risk management."
     ),
     url="http://localhost:9999/",
     version="1.0.0",
     default_input_modes=["text"],
     default_output_modes=["text"],
-    capabilities=AgentCapabilities(streaming=False),
+    capabilities=AgentCapabilities(streaming=True),
     skills=[market_skill, sec_skill, ml_skill, portfolio_skill, memo_skill],
 )
 
@@ -130,7 +172,7 @@ agent    = RaphiAgent()
 executor = RaphiAgentExecutor(agent)
 handler  = DefaultRequestHandler(
     agent_executor=executor,
-    task_store=InMemoryTaskStore(),
+    task_store=JsonFileTaskStore(BASE / ".raphi_audit" / "tasks.json"),
 )
 server = A2AStarletteApplication(
     agent_card=agent_card,

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
+from a2a.types import TaskState, TaskStatus, TaskStatusUpdateEvent
 from a2a.utils import new_agent_text_message
 
 from claude_agent_sdk import (
@@ -116,7 +117,7 @@ SYSTEM_PROMPT = """You are RAPHI (Real-time Agentic Platform for Human Investmen
 You have specialist subagents (dispatch via Task tool):
 - @market-analyst: real-time prices, technicals, fundamentals, news sentiment
 - @sec-researcher: SEC EDGAR XBRL financials (15 quarters, 9,457+ companies)
-- @ml-signals: XGBoost+LSTM trading signals with SHAP feature attribution plus GraphSAGE neighbor influence
+- @ml-signals: XGBoost+GB ensemble trading signals with SHAP feature attribution plus GraphSAGE neighbor influence
 - @portfolio-risk: VaR, P&L, Sharpe ratio, stop-loss alerts
 - @memo-synthesizer: full investment memo (orchestrates all four above in parallel)
 
@@ -413,19 +414,58 @@ class RaphiAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        user_text = ""
-        if context.message and context.message.parts:
-            for part in context.message.parts:
-                inner = part.root if hasattr(part, "root") else part
-                if hasattr(inner, "text"):
-                    user_text += inner.text
+        # Fix: use SDK helper instead of manual .root unwrapping
+        user_text = context.get_user_input() or "Provide a market overview."
 
-        if not user_text:
-            user_text = "Provide a market overview."
+        task_id    = context.task_id    or ""
+        context_id = context.context_id or ""
 
-        task_id = str(context.task_id) if getattr(context, "task_id", None) else None
-        result  = await self.agent.invoke(user_text, task_id=task_id)
-        await event_queue.enqueue_event(new_agent_text_message(result))
+        # Fix 3: role forwarded from A2A request metadata
+        # Callers pass {"role": "admin"|"analyst"|"viewer"} in MessageSendParams.metadata
+        role = str((context.metadata or {}).get("role", "analyst"))
+
+        response_tokens: list[str] = []
+
+        # Fix 2: stream events so A2A clients get progress updates via SSE
+        async for event in self.agent.stream(user_text, task_id=task_id or None, user_role=role):
+            if event["event"] == "step":
+                try:
+                    step_data = json.loads(event["data"]) if isinstance(event["data"], str) else event["data"]
+                    label = step_data.get("label", "Processing…")
+                except Exception:
+                    label = str(event["data"])
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        task_id=task_id,
+                        context_id=context_id,
+                        status=TaskStatus(
+                            state=TaskState.working,
+                            message=new_agent_text_message(
+                                label, task_id=task_id or None, context_id=context_id or None
+                            ),
+                        ),
+                        final=False,
+                    )
+                )
+            elif event["event"] == "token":
+                response_tokens.append(event["data"])
+            elif event["event"] == "error":
+                await event_queue.enqueue_event(
+                    TaskStatusUpdateEvent(
+                        task_id=task_id,
+                        context_id=context_id,
+                        status=TaskStatus(state=TaskState.failed),
+                        final=True,
+                    )
+                )
+                return
+
+        final_text = "".join(response_tokens) or "Analysis complete."
+        await event_queue.enqueue_event(
+            new_agent_text_message(
+                final_text, task_id=task_id or None, context_id=context_id or None
+            )
+        )
 
     async def cancel(
         self,
