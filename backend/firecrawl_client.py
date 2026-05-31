@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import date
 from typing import Optional
 
 import httpx
@@ -25,8 +26,8 @@ logger = logging.getLogger("raphi.firecrawl")
 
 _API_KEY      = os.environ.get("FIRECRAWL_API_KEY", "").strip()
 _BASE_URL     = "https://api.firecrawl.dev/v1"
-_SCRAPE_TTL   = 1800   # 30 minutes — web content changes slowly for our purposes
-_SEARCH_TTL   = 900    # 15 minutes
+_SCRAPE_TTL   = 300    # 5 minutes
+_SEARCH_TTL   = 120    # 2 minutes
 
 _cache: dict[str, tuple[float, object]] = {}
 
@@ -185,6 +186,19 @@ def search_web(
         return [{"success": False, "error": str(exc)}]
 
 
+def _recent_quarters(n: int = 2) -> str:
+    today = date.today()
+    q = (today.month - 1) // 3 + 1
+    y = today.year
+    quarters: list[str] = []
+    for _ in range(n + 1):
+        quarters.append(f"Q{q} {y}")
+        q -= 1
+        if q == 0:
+            q, y = 4, y - 1
+    return " OR ".join(quarters)
+
+
 def get_earnings_transcript(ticker: str, *, max_chars: int = 6000) -> dict:
     """
     Search for the most recent earnings call transcript for a ticker
@@ -196,7 +210,7 @@ def get_earnings_transcript(ticker: str, *, max_chars: int = 6000) -> dict:
     if not _API_KEY:
         return {"ticker": ticker, "success": False, "error": "FIRECRAWL_API_KEY not configured", "markdown": ""}
 
-    query = f"{ticker} earnings call transcript Q1 2025 OR Q4 2024 OR Q2 2025"
+    query = f"{ticker} earnings call transcript {_recent_quarters()}"
     results = search_web(query, limit=3, scrape_results=True, max_chars_per_result=max_chars)
 
     for result in results:

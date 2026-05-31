@@ -13,7 +13,7 @@ Architecture:
   │  Agent Swarm (Claude Agent SDK subagents)           │
   │    @market-analyst    → real-time prices + news     │
   │    @sec-researcher    → EDGAR XBRL financials       │
-  │    @ml-signals        → XGBoost+LSTM predictions    │
+  │    @ml-signals        → XGBoost+GB ensemble predictions    │
   │    @portfolio-risk    → VaR, Sharpe, stop-loss      │
   │    @memo-synthesizer  → full investment memo        │
   │                                                     │
@@ -98,14 +98,13 @@ from user_data_store import (
 )
 from paths import COMPANY_TICKERS_FILE
 
-# ── Initialise Sentry before anything else ───────────────────────────
-init_sentry()
+init_sentry()  # no-op
 
 # ── Paths ─────────────────────────────────────────────────────────────
 BASE       = Path(__file__).parent.parent
 STATIC_DIR = Path(__file__).parent / "static"
 SETTINGS_FILE     = BASE / "settings.json"
-DEFAULT_WATCHLIST = ["NVDA", "AAPL", "MSFT", "META", "TSLA", "AMZN", "GOOGL"]
+DEFAULT_WATCHLIST: list[str] = []
 TICKER_RE         = re.compile(r"^[A-Z]{1,5}$")
 TICKER_ALLOWLIST_EXTRAS = {
     # Common ETFs/funds used in this app and not always present in SEC ticker maps.
@@ -203,11 +202,11 @@ _agent_card = AgentCard(
         "ML signals, portfolio risk, and memo synthesizer — all orchestrated "
         "via the Agent-to-Agent (A2A) protocol and Claude Agent SDK."
     ),
-    url="http://localhost:9999/",
+    url=os.environ.get("RAPHI_PUBLIC_URL", "http://localhost:9999/"),
     version="2.0.0",
     default_input_modes=["text"],
     default_output_modes=["text"],
-    capabilities=AgentCapabilities(streaming=False),
+    capabilities=AgentCapabilities(streaming=True),
     skills=[
         AgentSkill(
             id="market_intel",
@@ -233,10 +232,10 @@ _agent_card = AgentCard(
             id="ml_signals",
             name="ML And Graph Trading Signals",
             description=(
-                "XGBoost + LSTM ensemble, SHAP explainability, and GraphSAGE "
+                "XGBoost + GB ensemble ensemble, SHAP explainability, and GraphSAGE "
                 "neighbor influence via @ml-signals subagent."
             ),
-            tags=["ml", "signals", "xgboost", "lstm", "shap", "gnn", "graphsage"],
+            tags=["ml", "signals", "xgboost", "gradient-boosting", "shap", "gnn", "graphsage"],
             examples=["Generate signal for MSFT", "Show NVDA graph-neighbor influence"],
         ),
         AgentSkill(
@@ -407,7 +406,7 @@ def _load_settings_for_scope(user_scope: str) -> dict:
     # Keep persisted state clean so plain English words never remain as tickers.
     original_watchlist = list(settings.get("watchlist", []))
     original_auto_added = list(settings.get("auto_added_tickers", []))
-    settings["watchlist"] = _sanitize_ticker_list(original_watchlist or DEFAULT_WATCHLIST)
+    settings["watchlist"] = _sanitize_ticker_list(original_watchlist)
     if "auto_added_tickers" in settings:
         settings["auto_added_tickers"] = _sanitize_ticker_list(original_auto_added)
 
@@ -567,7 +566,7 @@ def _watchlist(user_scope: str = "global") -> list[str]:
         if ticker not in seen:
             tickers.append(ticker)
             seen.add(ticker)
-    return tickers or DEFAULT_WATCHLIST
+    return tickers
 
 
 def _allowed_watchlist_tickers(requested: list[str], *, extra_tickers: list[str] | None = None, user_scope: str = "global") -> list[str]:
@@ -680,7 +679,7 @@ def _save_settings(s: dict) -> None:
 def _save_settings_for_scope(s: dict, user_scope: str) -> None:
     import json
     payload = dict(s)
-    payload["watchlist"] = _sanitize_ticker_list(payload.get("watchlist", DEFAULT_WATCHLIST)) or DEFAULT_WATCHLIST
+    payload["watchlist"] = _sanitize_ticker_list(payload.get("watchlist", []))
     if "auto_added_tickers" in payload:
         payload["auto_added_tickers"] = _sanitize_ticker_list(payload.get("auto_added_tickers", []))
     path = user_settings_path(user_scope) if user_scope != "global" else SETTINGS_FILE
@@ -1842,7 +1841,7 @@ def model_performance(request: Request):
     _, _, user_scope = _request_identity_scope(request)
     settings  = _load_settings_for_scope(user_scope)
     watchlist = settings.get("watchlist", DEFAULT_WATCHLIST)
-    models, xgb_accs, lstm_accs = [], [], []
+    models, xgb_accs, gb2_accs = [], [], []
 
     for t in watchlist:
         f = BASE / ".model_cache" / f"{t}.pkl"
@@ -1852,22 +1851,22 @@ def model_performance(request: Request):
             with open(f, "rb") as fh:
                 r = pickle.load(fh)
             xgb_accs.append(r.get("xgb_accuracy", 0))
-            lstm_accs.append(r.get("lstm_accuracy", 0))
+            gb2_accs.append(r.get("gb2_accuracy", 0))
             models.append({
                 "ticker": t, "xgb_acc": r.get("xgb_accuracy"),
-                "lstm_acc": r.get("lstm_accuracy"), "ens_acc": r.get("ensemble_accuracy"),
+                "gb2_acc": r.get("gb2_accuracy"), "ens_acc": r.get("ensemble_accuracy"),
                 "n_train": r.get("n_train"), "trained_at": r.get("trained_at"),
             })
         except Exception:
             pass
 
-    avg_xgb  = round(sum(xgb_accs)  / len(xgb_accs),  1) if xgb_accs  else None
-    avg_lstm = round(sum(lstm_accs) / len(lstm_accs), 1) if lstm_accs else None
+    avg_xgb = round(sum(xgb_accs) / len(xgb_accs), 1) if xgb_accs else None
+    avg_gb2 = round(sum(gb2_accs) / len(gb2_accs), 1) if gb2_accs else None
     return {
-        "models": models,
-        "avg_xgb_acc":  avg_xgb,
-        "avg_lstm_acc": avg_lstm,
-        "avg_ens_acc":  round((avg_xgb + avg_lstm) / 2, 1) if avg_xgb and avg_lstm else None,
+        "models":      models,
+        "avg_xgb_acc": avg_xgb,
+        "avg_gb2_acc": avg_gb2,
+        "avg_ens_acc": round((avg_xgb + avg_gb2) / 2, 1) if avg_xgb and avg_gb2 else None,
     }
 
 
@@ -2961,7 +2960,6 @@ async def chat(req: ChatRequest, request: Request):
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     api_key_anthropic = _anthropic_api_key_for_scope(user_scope)
-    _, _, user_scope = _request_identity_scope(request)
     snap   = _portfolio_snapshot_for_scope(user_scope)
     ticker = _resolve_chat_ticker(req)
     compact_mode = _is_compact_mode(req.response_mode)
@@ -3113,10 +3111,12 @@ Presentation rules for the RAPHI web console:
                 governance={"status": "fallback", "findings": []},
                 review={"status": "not_required"},
                 quality={
-                    "unsupported_claim_ratio": 0.0,
-                    "citation_precision": 1.0,
-                    "trace_completeness": 1.0,
-                    "routing_accuracy": 1.0,
+                    "sec_citation_used": False,
+                    "citation_count": 0,
+                    "tool_trace_steps": 0,
+                    "agentic_path_used": False,
+                    "eval_passed": None,
+                    "eval_score": None,
                 },
             )
             log_eval_run(run_record)
@@ -3294,7 +3294,7 @@ Presentation rules for the RAPHI web console:
                 local_steps = [
                     ("market", f"@market-analyst loaded live price, fundamentals, and news for {ticker}"),
                     ("sec", "@sec-researcher loaded local SEC filing history and XBRL when requested"),
-                    ("signals", "@ml-signals checked cached XGBoost/LSTM signal output"),
+                    ("signals", "@ml-signals checked cached XGBoost/GB ensemble signal output"),
                     ("gnn", "@gnn-influence checked graph status and neighbor influence"),
                     ("web", "@web-citation-search fetched web citation results when requested"),
                     ("portfolio", "@portfolio-risk computed exposure, P&L, VaR, and Sharpe"),
@@ -3311,12 +3311,12 @@ Presentation rules for the RAPHI web console:
                         "tool": mapped,
                     })
                     yield _sse("step", json.dumps({"id": step_id, "label": label, "attempt": attempt}))
-                    await asyncio.sleep(0.03)
 
                 retry_note = ""
                 if force_tools:
                     retry_note = "\n\nRetry policy: prioritize missing tool families -> " + ", ".join(sorted(force_tools))
                 fallback_system = f"{system}{retry_note}\n\n{_format_local_agent_context(local_context)}"
+                stream_had_error = False
                 async for chunk in _stream_direct_anthropic_chat(
                     req=req,
                     system=fallback_system,
@@ -3333,9 +3333,15 @@ Presentation rules for the RAPHI web console:
                         attempt_collected.append(data)
                         if stream_tokens_immediately:
                             yield chunk
+                    elif chunk.startswith("event: error"):
+                        stream_had_error = True
+                        yield chunk
                     else:
                         yield chunk
-                anthropic_breaker.record_success()
+                if not stream_had_error:
+                    anthropic_breaker.record_success()
+                else:
+                    anthropic_breaker.record_failure()
 
             candidate_response = "".join(attempt_collected)
             checks_context = dict(local_context or {})
@@ -3549,10 +3555,13 @@ Presentation rules for the RAPHI web console:
                 "strict_quality_gate": final_strict_gate,
             },
             quality={
-                "unsupported_claim_ratio": 0.0 if final_checks.get("sec_citation_used") else 0.1,
-                "citation_precision": 1.0 if citation_records else 0.5,
-                "trace_completeness": 1.0 if all_tool_trace else 0.0,
-                "routing_accuracy": 1.0 if final_used_agentic else 0.9,
+                # Measured from actual run artefacts — no invented proxies
+                "sec_citation_used": bool(final_checks.get("sec_citation_used")),
+                "citation_count": len(citation_records),
+                "tool_trace_steps": len(all_tool_trace),
+                "agentic_path_used": bool(final_used_agentic),
+                "eval_passed": bool(final_eval_result.get("passed")),
+                "eval_score": final_eval_result.get("overall_score"),
             },
         )
         log_eval_run(run_record)
@@ -3761,12 +3770,8 @@ Permanent graph memory:
                 + " ".join(compliance_report.get("findings", []))
             )
 
-        if stream_tokens_immediately:
-            for chunk in _chunk_text(final_text):
-                yield _sse("token", chunk)
-        else:
-            for chunk in _chunk_text(final_text):
-                yield _sse("token", chunk)
+        for chunk in _chunk_text(final_text):
+            yield _sse("token", chunk)
 
         run_record = build_run_record(
             run_id=run_id,
@@ -3801,10 +3806,12 @@ Permanent graph memory:
             governance=governance,
             review={**review_state, "compliance": compliance_report},
             quality={
-                "unsupported_claim_ratio": 0.0 if checks.get("sec_citation_used") else 0.1,
-                "citation_precision": 1.0 if citation_records else 0.5,
-                "trace_completeness": 1.0,
-                "routing_accuracy": 1.0,
+                "sec_citation_used": bool(checks.get("sec_citation_used")),
+                "citation_count": len(citation_records),
+                "tool_trace_steps": len(observed_tools),
+                "agentic_path_used": False,
+                "eval_passed": bool(eval_result.get("passed")) if eval_result else None,
+                "eval_score": eval_result.get("overall_score") if eval_result else None,
             },
         )
         log_eval_run(run_record)
@@ -4129,6 +4136,33 @@ def update_settings(body: SettingsBody, request: Request):
     return {"ok": True}
 
 
+# ── Agentic query endpoint ────────────────────────────────────────────
+
+class AgenticQueryRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4000)
+    history: list = Field(default_factory=list)
+    user_context: dict = Field(default_factory=dict)
+
+
+@api.post("/agentic/query")
+async def agentic_query(req: AgenticQueryRequest):
+    from backend.security import sanitize_user_input
+    from raphi.orchestrators.agent_loop import run_agentic_query
+
+    try:
+        clean_query = sanitize_user_input(req.query)
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    state = run_agentic_query(
+        clean_query,
+        history=req.history or None,
+        user_context=req.user_context or None,
+    )
+    return state.to_dict()
+
+
 # ── register data router ──────────────────────────────────────────────
 app.include_router(api)
 
@@ -4145,7 +4179,6 @@ if __name__ == "__main__":
     print(f"  Dashboard    : http://127.0.0.1:9999/")
     print(f"  Data API     : http://127.0.0.1:9999/api/*")
     print(f"  Auth         : {'✓ RAPHI_API_KEY set' if api_key else '⚠ UNPROTECTED'}")
-    print(f"  Sentry       : {'✓ enabled' if os.environ.get('SENTRY_DSN') else '○ not configured'}")
     print(f"  Agent swarm  : market-analyst · sec-researcher · ml-signals")
     print(f"                 portfolio-risk · memo-synthesizer")
     print("=" * 60)

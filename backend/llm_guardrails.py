@@ -30,27 +30,31 @@ GUARANTEE_PATTERNS = [
 ]
 
 COMMON_ACRONYMS = {
+    # Core financial / market terms
     "AI", "API", "AUM", "CAPEX", "CEO", "CFO", "CIK", "CPI", "DCF", "EBIT",
     "EBITDA", "EDGAR", "EPS", "ETF", "FCF", "FOMC", "FX", "FY", "GAAP", "GDP",
     "GNN", "GPU", "HTTP", "IPO", "JSON",
     "LLM", "MCP", "ML", "NASDAQ", "NYSE", "PCE", "PE", "RAG", "ROIC", "SEC",
     "SSE", "TTM", "UI", "USD", "VAR", "VIX", "XBRL",
     "BUY", "SELL", "HOLD", "LONG", "SHORT", "RAPHI",
-    # Finance / market abbreviations commonly appearing in AI-generated analysis
+    # Extended finance / macro abbreviations
     "RSI", "EV", "ESG", "HFT", "NAV", "SPX", "YTD", "OPEX", "WACC", "PMI",
-    "ISM", "OEM", "FED", "TAM", "EBIT",
-    # Tech / chip / AI product terms
-    "CUDA", "FSD", "GPU",
-    # SEC form abbreviations
-    "DEF", "HR", "FORM",
-    # Generic English words and web/data terms that regex would match
-    "URL", "CSV", "PDF", "XBRL",
+    "ISM", "OEM", "FED", "TAM",
+    # Tech / chip product terms
+    "CUDA", "FSD",
+    # SEC form abbreviations and generic data terms
+    "DEF", "HR", "FORM", "URL", "CSV", "PDF",
 }
 
 COMMON_MARKET_REFERENCES = {
     "BTC", "ETH", "SPY", "QQQ", "TLT", "GLD", "DXY",
     # Peer references commonly cited in AI/chip/EV analysis
     "TSMC", "ARM",
+    # Single-char NYSE tickers — must be listed explicitly so they are recognised
+    # as valid and not reported as unknown when the parenthesised-ticker pattern
+    # picks them up (e.g. "Ford Motor Company (F)").
+    "A", "B", "C", "D", "E", "F", "G", "H", "K", "L",
+    "M", "N", "O", "P", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
 }
 
 
@@ -100,7 +104,11 @@ def find_missing_memo_sections(text: str) -> list[str]:
 
 def find_unknown_tickers(text: str, allowed_tickers: Iterable[str]) -> list[str]:
     allowed = {t.upper() for t in allowed_tickers if t}
+    # Standard 2-5 char tickers / acronyms
     tokens = set(re.findall(r"\b[A-Z]{2,5}\b", text))
+    # Single-char tickers in parentheses — the common financial format: "Ford (F)"
+    # Using \(([A-Z])\) avoids false positives from sentence-initial capitals.
+    tokens |= set(re.findall(r"\(([A-Z])\)", text))
     unknown = sorted(
         t for t in tokens
         if t not in allowed

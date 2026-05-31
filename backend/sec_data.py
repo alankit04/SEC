@@ -14,12 +14,18 @@ try:
 except ImportError:  # pragma: no cover - package import path
     from backend.paths import COMPANY_TICKERS_FILE, DATA_DIR
 
-QUARTERS = [
-    "2022q1","2022q2","2022q3","2022q4",
-    "2023q1","2023q2","2023q3","2023q4",
-    "2024q1","2024q2","2024q3","2024q4",
-    "2025q1","2025q2","2025q3","2025q4",
-]
+import re as _re
+from datetime import date as _date
+
+def _discover_quarters() -> list[str]:
+    pattern = _re.compile(r"^\d{4}q[1-4]$")
+    if DATA_DIR.exists():
+        found = sorted(d.name for d in DATA_DIR.iterdir() if d.is_dir() and pattern.match(d.name))
+        if found:
+            return found
+    return [f"{y}q{q}" for y in range(2022, _date.today().year + 1) for q in range(1, 5)]
+
+QUARTERS = _discover_quarters()
 
 # Key XBRL tags we care about
 FINANCIAL_TAGS = {

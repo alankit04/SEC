@@ -54,10 +54,10 @@ MARKET_TICKERS = {
     "DX-Y.NYB": "dxy",
 }
 
-PRICE_TTL  = 60      # seconds
-FUND_TTL   = 3600    # 1 hour
-NEWS_TTL   = 900     # 15 minutes
-HIST_TTL   = 3600    # 1 hour
+PRICE_TTL  = 30      # seconds
+FUND_TTL   = 300     # 5 minutes
+NEWS_TTL   = 120     # 2 minutes
+HIST_TTL   = 300     # 5 minutes
 
 
 class MarketData:
@@ -106,8 +106,14 @@ class MarketData:
         for sym, label in MARKET_TICKERS.items():
             result[label] = self.ticker_price(sym)
         from datetime import datetime
-        now = datetime.now()
-        result["market_open"] = now.weekday() < 5 and 9 <= now.hour < 16
+        import zoneinfo
+        now = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+        market_open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        result["market_open"] = (
+            now.weekday() < 5
+            and market_open_time <= now < market_close_time
+        )
         result["timestamp"]   = now.isoformat()
         return self._set(key, result)
 
@@ -246,6 +252,54 @@ class MarketData:
             return self._set(key, h)
         except Exception:
             return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    def get_trending_tickers(self, limit: int = 25) -> list[dict]:
+        """
+        Return trending tickers from Yahoo Finance predefined screeners:
+        day gainers and most active. Results are merged, deduplicated, and
+        annotated with source metadata for the trending_stocks_workflow.
+        """
+        key = f"trending:{limit}"
+        if self._fresh(key, PRICE_TTL):
+            return self._cache[key]  # type: ignore[return-value]
+
+        from datetime import datetime, timezone
+        import zoneinfo
+        screeners = [
+            ("day_gainers",   "Yahoo Finance day gainers screener"),
+            ("most_actives",  "Yahoo Finance most active screener"),
+        ]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        seen: set[str] = set()
+        results: list[dict] = []
+
+        for screener_id, provider_label in screeners:
+            try:
+                screener = yf.Screener()
+                screener.set_predefined_body(screener_id)
+                screener.set_count(min(limit, 25))
+                resp = screener.response
+                quotes = (resp or {}).get("quotes") or []
+                for q in quotes:
+                    ticker = str(q.get("symbol") or "").upper().strip()
+                    if not ticker or ticker in seen or len(ticker) > 5:
+                        continue
+                    seen.add(ticker)
+                    results.append({
+                        "ticker":       ticker,
+                        "provider":     provider_label,
+                        "metric":       screener_id,
+                        "pct_change":   _safe_float(q.get("regularMarketChangePercent")),
+                        "price":        _safe_float(q.get("regularMarketPrice")),
+                        "volume":       q.get("regularMarketVolume"),
+                        "source_url":   f"https://finance.yahoo.com/markets/stocks/{screener_id.replace('_', '-')}/",
+                        "retrieved_at": now_iso,
+                    })
+            except Exception:
+                pass
+
+        return self._set(key, results[:limit])
 
 
 # ------------------------------------------------------------------

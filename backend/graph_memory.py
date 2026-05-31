@@ -52,6 +52,33 @@ MEMORY_KEYWORDS = {
     "user preference": "Concept",
 }
 
+# Uppercase tokens that look like tickers but aren't — prevents POST, SQL, CEO
+# etc. from polluting the entity graph. Prefer $AAPL syntax for unambiguous
+# ticker extraction; this list is the fallback filter for bare uppercase words.
+_NON_TICKER_TOKENS: frozenset[str] = frozenset({
+    # HTTP / web
+    "HTTP", "HTTPS", "HTML", "REST", "GET", "POST", "PUT", "PATCH", "DELETE",
+    "URL", "URI", "API", "SDK", "UI", "UX", "CSS", "DOM",
+    # Data formats
+    "JSON", "XML", "CSV", "SQL", "YAML", "TOML", "PDF",
+    # Programming
+    "NULL", "NONE", "TRUE", "FALSE", "VOID", "UUID", "UTF",
+    # Finance (non-ticker abbreviations)
+    "IPO", "ETF", "ETL", "GDP", "CPI", "PPI", "EPS", "TTM",
+    "YOY", "QOQ", "YTD", "AUM", "NAV", "IRR", "NPV", "DCF",
+    "BUY", "SELL", "HOLD",
+    # Roles / titles
+    "CEO", "CFO", "CTO", "COO", "VP", "MD", "PHD", "CFA", "CPA",
+    # Macro / regulators
+    "US", "EU", "UK", "USA", "IMF", "FED", "ECB", "SEC", "CFTC",
+    # RAPHI-specific
+    "GNN", "MCP", "A2A", "LLM", "NLP", "ML", "AI", "RAG",
+    # Cloud / infra
+    "AWS", "GCP", "CPU", "GPU", "RAM", "SSD", "TCP", "UDP", "SSH", "TLS",
+    # Generic
+    "FAST", "OPEN", "CLOSE", "HIGH", "LOW",
+})
+
 STOP_WORDS = {
     "about", "after", "again", "also", "and", "are", "because", "before",
     "being", "between", "but", "can", "does", "done", "for", "from",
@@ -136,8 +163,17 @@ def extract_entities(text: str) -> list[dict[str, str]]:
             "name": name,
         }
 
+    # $AAPL-style explicit ticker references — high precision, no ambiguity.
+    for match in re.findall(r"\$([A-Z]{1,5})\b", text):
+        entities[entity_id("Ticker", match)] = {
+            "id": entity_id("Ticker", match),
+            "type": "Ticker",
+            "name": match,
+        }
+
+    # Bare uppercase tokens — lower precision; filter common abbreviations.
     for token in re.findall(r"\b[A-Z]{2,5}\b", text):
-        if token not in {"HTTP", "JSON", "HTML", "API", "FAST", "SEC", "GNN"}:
+        if token not in _NON_TICKER_TOKENS:
             entities[entity_id("Ticker", token)] = {
                 "id": entity_id("Ticker", token),
                 "type": "Ticker",
@@ -186,7 +222,6 @@ def classify_sentence(sentence: str) -> Optional[tuple[str, float, float]]:
 def extract_memories(
     user_text: str,
     assistant_text: str = "",
-    source: str = "interaction",
     base_importance: float = 0.55,
 ) -> list[MemoryCandidate]:
     """Extract durable memory candidates from an interaction."""
@@ -362,7 +397,7 @@ class Neo4jGraphMemory:
         now = utc_now()
         scoped_user_id = _normalize_user_id(user_id or self.user_id)
         interaction_id = f"int-{uuid.uuid4().hex}"
-        candidates = extract_memories(user_text, assistant_text, source, importance)
+        candidates = extract_memories(user_text, assistant_text, importance)
         statements: list[dict[str, Any]] = [
             {
                 "statement": """
@@ -528,7 +563,8 @@ class Neo4jGraphMemory:
             rows.append(row)
         return rows
 
-    def format_context(self, memories: list[dict[str, Any]]) -> str:
+    @staticmethod
+    def format_context(memories: list[dict[str, Any]]) -> str:
         lines = []
         for item in memories:
             freq = item.get("frequency") or 1
@@ -543,15 +579,20 @@ class Neo4jGraphMemory:
         if not self.configured:
             return {"ok": False, "reason": "neo4j_not_configured"}
         self.setup_schema()
-        self._commit([{
+        result = self._commit([{
             "statement": """
             MATCH (m:Memory {id: $memory_id})
-            SET m.importance = coalesce(m.importance, 0.0) + $delta,
+            SET m.importance = CASE
+                    WHEN coalesce(m.importance, 0.0) + $delta > 1.0 THEN 1.0
+                    ELSE coalesce(m.importance, 0.0) + $delta
+                END,
                 m.last_seen = $now
             RETURN m.id AS id, m.importance AS importance
             """,
             "parameters": {"memory_id": memory_id_value, "delta": float(delta), "now": utc_now()},
         }])
+        if not self._records(result, 0):
+            return {"ok": False, "reason": "memory_not_found", "memory_id": memory_id_value}
         return {"ok": True, "memory_id": memory_id_value}
 
     def _commit(self, statements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -585,48 +626,48 @@ class Neo4jGraphMemory:
             rows.append(dict(zip(columns, values)))
         return rows
 
-        def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
-            if not self.configured:
-                return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "records": [], "count": 0}
-            scoped_user_id = _normalize_user_id(user_id)
-            result = self._commit([{
-                "statement": """
-                MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
-                WHERE m.user_id = $user_id
-                RETURN m.id AS id, m.kind AS kind, m.text AS text, m.summary AS summary,
-                       m.importance AS importance, m.confidence AS confidence, m.last_seen AS last_seen
-                ORDER BY m.last_seen DESC
-                LIMIT $limit
-                """,
-                "parameters": {
-                    "project_id": self.project_id,
-                    "user_id": scoped_user_id,
-                    "limit": int(max(1, min(limit, 5000))),
-                },
-            }])
-            rows = self._records(result, 0)
-            return {"backend": "neo4j", "user_id": scoped_user_id, "records": rows, "count": len(rows)}
+    def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
+        if not self.configured:
+            return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "records": [], "count": 0}
+        scoped_user_id = _normalize_user_id(user_id)
+        result = self._commit([{
+            "statement": """
+            MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
+            WHERE m.user_id = $user_id
+            RETURN m.id AS id, m.kind AS kind, m.text AS text, m.summary AS summary,
+                   m.importance AS importance, m.confidence AS confidence, m.last_seen AS last_seen
+            ORDER BY m.last_seen DESC
+            LIMIT $limit
+            """,
+            "parameters": {
+                "project_id": self.project_id,
+                "user_id": scoped_user_id,
+                "limit": int(max(1, min(limit, 5000))),
+            },
+        }])
+        rows = self._records(result, 0)
+        return {"backend": "neo4j", "user_id": scoped_user_id, "records": rows, "count": len(rows)}
 
-        def delete_user_data(self, user_id: str) -> dict[str, Any]:
-            if not self.configured:
-                return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "deleted": 0}
-            scoped_user_id = _normalize_user_id(user_id)
-            result = self._commit([{
-                "statement": """
-                MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
-                WHERE m.user_id = $user_id
-                WITH collect(m) AS nodes
-                FOREACH (n IN nodes | DETACH DELETE n)
-                RETURN size(nodes) AS deleted
-                """,
-                "parameters": {
-                    "project_id": self.project_id,
-                    "user_id": scoped_user_id,
-                },
-            }])
-            rows = self._records(result, 0)
-            deleted = int(rows[0].get("deleted") or 0) if rows else 0
-            return {"backend": "neo4j", "user_id": scoped_user_id, "deleted": deleted}
+    def delete_user_data(self, user_id: str) -> dict[str, Any]:
+        if not self.configured:
+            return {"backend": "neo4j", "user_id": _normalize_user_id(user_id), "deleted": 0}
+        scoped_user_id = _normalize_user_id(user_id)
+        result = self._commit([{
+            "statement": """
+            MATCH (m:Memory)-[:IN_PROJECT]->(:Project {id: $project_id})
+            WHERE m.user_id = $user_id
+            WITH collect(m) AS nodes
+            FOREACH (n IN nodes | DETACH DELETE n)
+            RETURN size(nodes) AS deleted
+            """,
+            "parameters": {
+                "project_id": self.project_id,
+                "user_id": scoped_user_id,
+            },
+        }])
+        rows = self._records(result, 0)
+        deleted = int(rows[0].get("deleted") or 0) if rows else 0
+        return {"backend": "neo4j", "user_id": scoped_user_id, "deleted": deleted}
 
 
 class LocalGraphMemory:
@@ -690,7 +731,7 @@ class LocalGraphMemory:
 
         stored = []
         memories = memories_by_user.setdefault(scoped_user_id, {})
-        for candidate in extract_memories(user_text, assistant_text, source, importance):
+        for candidate in extract_memories(user_text, assistant_text, importance):
             mid = memory_id(candidate.kind, candidate.text, user_id=scoped_user_id)
             stored.append({"id": mid, "kind": candidate.kind, "text": candidate.text})
             current = memories.get(mid)
@@ -776,7 +817,7 @@ class LocalGraphMemory:
         return rows[: int(max(1, min(limit, 25)))]
 
     def format_context(self, memories: list[dict[str, Any]]) -> str:
-        return Neo4jGraphMemory.format_context(self, memories)
+        return Neo4jGraphMemory.format_context(memories)
 
     def reinforce(self, memory_id_value: str, delta: float = 0.1) -> dict[str, Any]:
         data = self._load()
@@ -790,7 +831,7 @@ class LocalGraphMemory:
             item = data.get("memories", {}).get(memory_id_value)
         if not item:
             return {"ok": False, "reason": "memory_not_found", "memory_id": memory_id_value}
-        item["importance"] = float(item.get("importance") or 0) + float(delta)
+        item["importance"] = min(1.0, float(item.get("importance") or 0) + float(delta))
         item["last_seen"] = utc_now()
         self._save(data)
         return {"ok": True, "backend": "local_json", "memory_id": memory_id_value}
@@ -882,48 +923,48 @@ class ResilientGraphMemory:
         }
 
     def remember_interaction(self, *args, **kwargs) -> dict[str, Any]:
-        try:
-            if self.primary.status().get("available"):
+        if self.primary.configured:
+            try:
                 return self.primary.remember_interaction(*args, **kwargs)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return self.fallback.remember_interaction(*args, **kwargs)
 
     def retrieve_context(self, *args, **kwargs) -> list[dict[str, Any]]:
-        try:
-            if self.primary.status().get("available"):
+        if self.primary.configured:
+            try:
                 return self.primary.retrieve_context(*args, **kwargs)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return self.fallback.retrieve_context(*args, **kwargs)
 
     def format_context(self, memories: list[dict[str, Any]]) -> str:
         return self.fallback.format_context(memories)
 
     def reinforce(self, *args, **kwargs) -> dict[str, Any]:
-        try:
-            if self.primary.status().get("available"):
+        if self.primary.configured:
+            try:
                 return self.primary.reinforce(*args, **kwargs)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return self.fallback.reinforce(*args, **kwargs)
 
     def export_user_data(self, user_id: str, limit: int = 1000) -> dict[str, Any]:
-        try:
-            if self.primary.status().get("available"):
+        if self.primary.configured:
+            try:
                 return self.primary.export_user_data(user_id, limit=limit)
-        except Exception:
-            pass
+            except Exception:
+                pass
         return self.fallback.export_user_data(user_id, limit=limit)
 
     def delete_user_data(self, user_id: str) -> dict[str, Any]:
         primary_deleted = 0
         fallback_deleted = 0
-        try:
-            if self.primary.status().get("available"):
+        if self.primary.configured:
+            try:
                 primary_deleted = int(self.primary.delete_user_data(user_id).get("deleted", 0))
-        except Exception:
-            pass
+            except Exception:
+                pass
         try:
             fallback_deleted = int(self.fallback.delete_user_data(user_id).get("deleted", 0))
         except Exception:

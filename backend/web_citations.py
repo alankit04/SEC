@@ -10,7 +10,7 @@ try:
 except ImportError:  # pragma: no cover
     from backend.citation_index import CitationIndex, get_citation_index
 
-_SEARCH_TTL = 900
+_SEARCH_TTL = 120   # 2 minutes — matches edgar_live search TTL for consistent freshness
 _cache: dict[str, tuple[float, dict]] = {}
 _index = get_citation_index()
 

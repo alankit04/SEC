@@ -151,7 +151,7 @@ class PortfolioManager:
         sharpe = self._compute_sharpe(enriched, returns_map)
 
         # Portfolio vs SPY alpha
-        alpha_pct = self._portfolio_alpha(total_value, total_cost)
+        alpha_pct = self._portfolio_alpha(total_value, total_cost, enriched, returns_map)
 
         return {
             "positions":     enriched,
@@ -195,12 +195,43 @@ class PortfolioManager:
             return 0.0
         return float(combined.mean() / combined.std() * np.sqrt(252))
 
-    def _portfolio_alpha(self, total_value: float, total_cost: float) -> float:
+    def _portfolio_alpha(
+        self,
+        total_value: float,
+        total_cost: float,
+        enriched: list,
+        returns_map: dict,
+    ) -> float:
         if total_cost == 0:
             return 0.0
+
+        # Use trailing 1-year returns already in returns_map so both sides
+        # cover the identical date range (fixes mismatched-horizon comparison).
+        if returns_map and total_value > 0:
+            try:
+                weights = {
+                    p["ticker"]: p["market_value"] / total_value
+                    for p in enriched
+                    if p["ticker"] in returns_map
+                }
+                if weights:
+                    port_series = sum(
+                        returns_map[t] * w for t, w in weights.items()
+                    ).dropna()
+                    spy_hist = yf.Ticker("SPY").history(period="1y")
+                    spy_series = spy_hist["Close"].pct_change().dropna()
+                    common = port_series.index.intersection(spy_series.index)
+                    if len(common) > 20:
+                        port_1y = float((1 + port_series.loc[common]).prod() - 1) * 100
+                        spy_1y  = float((1 + spy_series.loc[common]).prod() - 1) * 100
+                        return round(port_1y - spy_1y, 2)
+            except Exception:
+                pass
+
+        # Fallback when returns_map unavailable: P&L since entry vs 1-year SPY
         port_ret = (total_value - total_cost) / total_cost * 100
         try:
-            spy = yf.Ticker("SPY").history(period="6mo")
+            spy = yf.Ticker("SPY").history(period="1y")
             if len(spy) >= 2:
                 spy_ret = (float(spy["Close"].iloc[-1]) - float(spy["Close"].iloc[0])) \
                           / float(spy["Close"].iloc[0]) * 100

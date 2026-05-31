@@ -60,27 +60,10 @@ try:
 except ImportError:
     from backend.paths import MODEL_CACHE_DIR
 
-# ── keep in sync with ml_model.py ──────────────────────────────────────
-FEATURE_NAMES = [
-    "rsi_14", "macd_hist", "bb_pct",
-    "mom_5d", "mom_20d", "mom_50d",
-    "vol_ratio", "ret_5d", "ret_20d",
-    "volatility", "pe_norm", "rev_growth",
-]
-FEATURE_LABELS = {
-    "rsi_14":     "RSI (14D)",
-    "macd_hist":  "MACD Signal",
-    "bb_pct":     "Bollinger Position",
-    "mom_5d":     "5D Momentum",
-    "mom_20d":    "20D Momentum",
-    "mom_50d":    "50D Momentum",
-    "vol_ratio":  "Volume Ratio",
-    "ret_5d":     "5D Return",
-    "ret_20d":    "20D Return",
-    "volatility": "20D Volatility",
-    "pe_norm":    "P/E (Normalized)",
-    "rev_growth": "Revenue Growth",
-}
+try:
+    from ml_model import compute_features as _compute_features, FEATURE_NAMES, FEATURE_LABELS
+except ImportError:
+    from backend.ml_model import compute_features as _compute_features, FEATURE_NAMES, FEATURE_LABELS
 
 N_FEATURES      = len(FEATURE_NAMES)
 CORR_THRESHOLD  = 0.65          # |ρ| threshold for correlation edges
@@ -107,6 +90,7 @@ class GraphData:
     edge_dst:      np.ndarray             # (E,) destination node indices
     adj:           dict[int, list[int]]   # adjacency list (no self-loops)
     sic_map:       dict[str, str]         # ticker → 4-digit SIC string
+    corr_mat:      np.ndarray             # (N, N) pairwise return correlations
     built_at:      float = field(default_factory=time.time)
 
     def node_idx(self, ticker: str) -> Optional[int]:
@@ -116,50 +100,6 @@ class GraphData:
             return None
 
 
-# ══════════════════════════════════════════════════════════════════════
-# FEATURE COMPUTATION  (mirrors ml_model._features exactly)
-# ══════════════════════════════════════════════════════════════════════
-
-def _compute_features(hist: pd.DataFrame,
-                      pe: float = 25.0,
-                      rev_growth: float = 0.0) -> pd.DataFrame:
-    df = hist.copy()
-
-    # RSI-14
-    delta = df["Close"].diff()
-    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    loss  = (-delta.clip(upper=0)).ewm(span=14, adjust=False).mean()
-    df["rsi_14"] = 100 - 100 / (1 + gain / (loss + 1e-9))
-
-    # MACD histogram
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    macd  = ema12 - ema26
-    df["macd_hist"] = macd - macd.ewm(span=9, adjust=False).mean()
-
-    # Bollinger % position
-    sma20 = df["Close"].rolling(20).mean()
-    std20 = df["Close"].rolling(20).std()
-    df["bb_pct"] = (df["Close"] - (sma20 - 2 * std20)) / (4 * std20 + 1e-9)
-
-    # Momentum
-    df["mom_5d"]  = df["Close"].pct_change(5)
-    df["mom_20d"] = df["Close"].pct_change(20)
-    df["mom_50d"] = df["Close"].pct_change(50)
-
-    # Volume ratio
-    df["vol_ratio"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-9)
-
-    # Returns & volatility
-    df["ret_5d"]    = df["Close"].pct_change(5)
-    df["ret_20d"]   = df["Close"].pct_change(20)
-    df["volatility"] = df["Close"].pct_change().rolling(20).std()
-
-    # Fundamentals (scalar broadcast — same default treatment as ml_model)
-    df["pe_norm"]    = float((pe - 25) / 15)
-    df["rev_growth"] = float(rev_growth / 100 if abs(rev_growth) > 1 else rev_growth)
-
-    return df[FEATURE_NAMES].dropna()
 
 
 def _relative_labels(
@@ -329,6 +269,7 @@ class GraphBuilder:
             edge_dst     = edge_dst,
             adj          = adj,
             sic_map      = sic_map,
+            corr_mat     = corr_mat,
         )
 
 
@@ -485,76 +426,127 @@ if HAS_PYG:
             x = F.relu(self.bn2(self.conv2(x, edge_index)))
             return self.head(x)
 
+    def _best_device() -> "torch.device":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
     class _TorchSAGE:
         """Trains and wraps a _TorchSAGENet on the full historical graph."""
 
         def __init__(self):
-            self.net    = _TorchSAGENet()
-            self.scaler = StandardScaler()
-            self._fitted = False
+            self._device     = _best_device()
+            self.net         = _TorchSAGENet().to(self._device)
+            self.scaler      = StandardScaler()
+            self._fitted     = False
+            self._edge_index: "torch.Tensor | None" = None
 
         def fit(self, graph: GraphData) -> "_TorchSAGE":
-            N, T, F = graph.feat_history.shape
+            N, T, F  = graph.feat_history.shape
             usable_T = T - FWD_DAYS - 1
 
-            # Flatten history for scaler fit
+            # Fit scaler on flattened training window
             flat = graph.feat_history[:, :usable_T, :].reshape(-1, F)
             self.scaler.fit(flat)
 
-            edge_index = torch.tensor(
+            # Pre-scale entire history once → tensors on device (no per-step transform)
+            scaled = self.scaler.transform(flat).reshape(N, usable_T, F)
+            X_all  = torch.tensor(scaled,                              dtype=torch.float32)  # (N, usable_T, F)
+            Y_all  = torch.tensor(graph.label_history[:, :usable_T],  dtype=torch.long)     # (N, usable_T)
+
+            self._edge_index = torch.tensor(
                 np.stack([graph.edge_src, graph.edge_dst], axis=0),
                 dtype=torch.long,
-            )
+            ).to(self._device)
+            edge_index = self._edge_index
 
-            optimizer = torch.optim.Adam(self.net.parameters(), lr=1e-3,
-                                         weight_decay=1e-4)
-            criterion = torch.nn.CrossEntropyLoss()
+            # Temporal train/val split — last 15% of time steps for validation
+            val_T   = max(1, int(usable_T * 0.15))
+            train_T = usable_T - val_T
+            X_train, X_val = X_all[:, :train_T, :], X_all[:, train_T:, :]
+            Y_train, Y_val = Y_all[:, :train_T],    Y_all[:, train_T:]
+
+            optimizer      = torch.optim.Adam(self.net.parameters(), lr=1e-3,
+                                              weight_decay=1e-4)
+            criterion      = torch.nn.CrossEntropyLoss()
+            best_val_loss  = float("inf")
+            best_state:    dict | None = None
+            patience       = 15
+            no_improve     = 0
 
             self.net.train()
             for epoch in range(200):
-                total_loss = 0.0
-                for t in range(usable_T):
-                    feat_t  = graph.feat_history[:, t, :]       # (N, F)
-                    feat_sc = self.scaler.transform(feat_t)
-                    x       = torch.tensor(feat_sc, dtype=torch.float32)
-                    y       = torch.tensor(
-                        graph.label_history[:, t], dtype=torch.long
-                    )
+                # ── train ────────────────────────────────────────────────
+                train_loss = 0.0
+                for t in range(train_T):
+                    x = X_train[:, t, :].to(self._device)
+                    y = Y_train[:, t].to(self._device)
                     optimizer.zero_grad()
-                    logits = self.net(x, edge_index)
-                    loss   = criterion(logits, y)
+                    loss = criterion(self.net(x, edge_index), y)
                     loss.backward()
                     optimizer.step()
-                    total_loss += loss.item()
+                    train_loss += loss.item()
+
+                # ── validate ─────────────────────────────────────────────
+                self.net.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for t in range(val_T):
+                        x = X_val[:, t, :].to(self._device)
+                        y = Y_val[:, t].to(self._device)
+                        val_loss += criterion(self.net(x, edge_index), y).item()
+                val_loss /= val_T
+                self.net.train()
+
+                # ── early stopping ───────────────────────────────────────
+                if val_loss < best_val_loss - 1e-4:
+                    best_val_loss = val_loss
+                    best_state    = {k: v.clone() for k, v in self.net.state_dict().items()}
+                    no_improve    = 0
+                else:
+                    no_improve += 1
+                    if no_improve >= patience:
+                        logger.debug(
+                            "TorchSAGE early stop at epoch %d  val_loss=%.4f", epoch, val_loss
+                        )
+                        break
+
                 if epoch % 50 == 0:
-                    logger.debug("TorchSAGE epoch %d  loss=%.4f", epoch,
-                                 total_loss / usable_T)
+                    logger.debug(
+                        "TorchSAGE epoch %d  train=%.4f  val=%.4f  device=%s",
+                        epoch, train_loss / train_T, val_loss, self._device,
+                    )
+
+            if best_state:
+                self.net.load_state_dict(best_state)
 
             self._fitted = True
             return self
 
-        def predict_proba(self, feat_mat: np.ndarray,
-                          adj: dict[int, list[int]]) -> np.ndarray:
-            # Build edge_index from adj (no self-loops needed — SAGEConv adds them)
+        def _get_edge_index(self, adj: dict[int, list[int]]) -> "torch.Tensor":
+            if self._edge_index is not None:
+                return self._edge_index
             srcs, dsts = [], []
             for src, nbrs in adj.items():
                 for dst in nbrs:
                     srcs.append(src)
                     dsts.append(dst)
-            if srcs:
-                edge_index = torch.tensor(
-                    [srcs, dsts], dtype=torch.long
-                )
-            else:
-                N = feat_mat.shape[0]
-                edge_index = torch.zeros((2, 0), dtype=torch.long)
+            return (
+                torch.tensor([srcs, dsts], dtype=torch.long)
+                if srcs else torch.zeros((2, 0), dtype=torch.long)
+            ).to(self._device)
 
+        def predict_proba(self, feat_mat: np.ndarray,
+                          adj: dict[int, list[int]]) -> np.ndarray:
+            edge_index = self._get_edge_index(adj)
             feat_sc = self.scaler.transform(feat_mat)
-            x       = torch.tensor(feat_sc, dtype=torch.float32)
+            x = torch.tensor(feat_sc, dtype=torch.float32).to(self._device)
             self.net.eval()
             with torch.no_grad():
                 logits = self.net(x, edge_index)
-                return F.softmax(logits, dim=-1).numpy()   # (N, 2)
+                return F.softmax(logits, dim=-1).cpu().numpy()   # (N, 2)
 
         def neighbor_influence(self, node_idx: int,
                                feat_mat: np.ndarray,
@@ -563,26 +555,19 @@ if HAS_PYG:
             if not self._fitted:
                 return {}
 
-            srcs, dsts = [], []
-            for src, nbrs in adj.items():
-                for dst in nbrs:
-                    srcs.append(src)
-                    dsts.append(dst)
-            edge_index = (torch.tensor([srcs, dsts], dtype=torch.long)
-                          if srcs else torch.zeros((2, 0), dtype=torch.long))
+            edge_index = self._get_edge_index(adj)
 
             feat_sc = self.scaler.transform(feat_mat)
-            x       = torch.tensor(feat_sc, dtype=torch.float32,
-                                   requires_grad=True)
+            x = torch.tensor(feat_sc, dtype=torch.float32,
+                              requires_grad=True).to(self._device)
             self.net.eval()
             logits = self.net(x, edge_index)
             p_long = F.softmax(logits, dim=-1)[node_idx, 1]
             p_long.backward()
 
-            grads = x.grad.detach().numpy()         # (N, F)
+            grads = x.grad.detach().cpu().numpy()   # (N, F)
             scores: dict[int, float] = {}
             for nbr in adj.get(node_idx, []):
-                # Hadamard magnitude of gradient × feature value
                 scores[nbr] = float(np.abs(grads[nbr] * feat_sc[nbr]).sum())
             return scores
 
@@ -654,17 +639,34 @@ class GNNSignalEngine:
         return set(tickers).issubset(graph_tickers)
 
     def _load_cache(self):
-        if self._cache_path.exists():
-            try:
-                with open(self._cache_path, "rb") as fh:
-                    state          = pickle.load(fh)
-                self._graph        = state["graph"]
-                self._model        = state["model"]
-                self._built_at     = state["built_at"]
-                age_h = (time.time() - self._built_at) / 3600
-                logger.info("GNN: loaded cached model (%.1f h old)", age_h)
-            except Exception as exc:
-                logger.warning("GNN cache load failed (%s) — will retrain.", exc)
+        if not self._cache_path.exists():
+            return
+        # Reject cache files not owned by the current process user to prevent
+        # pickle injection if the model cache directory is world-writable.
+        try:
+            import os as _os
+            stat = self._cache_path.stat()
+            if stat.st_uid != _os.getuid():
+                logger.warning(
+                    "GNN: cache file %s is owned by uid %d, expected %d — refusing to load.",
+                    self._cache_path, stat.st_uid, _os.getuid(),
+                )
+                return
+        except Exception as exc:
+            logger.warning("GNN: cache ownership check failed (%s) — refusing to load.", exc)
+            return
+        try:
+            with open(self._cache_path, "rb") as fh:
+                state          = pickle.load(fh)
+            if not isinstance(state, dict) or not {"graph", "model", "built_at"}.issubset(state):
+                raise ValueError("Unexpected cache structure")
+            self._graph        = state["graph"]
+            self._model        = state["model"]
+            self._built_at     = float(state["built_at"])
+            age_h = (time.time() - self._built_at) / 3600
+            logger.info("GNN: loaded cached model (%.1f h old)", age_h)
+        except Exception as exc:
+            logger.warning("GNN cache load failed (%s) — will retrain.", exc)
 
     def _save_cache(self):
         try:

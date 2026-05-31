@@ -19,12 +19,17 @@ import os
 import re
 import time
 from pathlib import Path
-from urllib.parse import urlencode
 
 import httpx
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+
+try:
+    from backend.knowledge_graph import KnowledgeGraph as _KG
+    _kg = _KG.get()
+except Exception:  # pragma: no cover
+    _kg = None  # type: ignore[assignment]
 
 try:
     from tool_result_cache import ToolResultCache
@@ -33,7 +38,7 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("raphi.mcp")
 
-BASE_URL = "http://localhost:9999"
+BASE_URL = os.environ.get("RAPHI_PUBLIC_URL", "http://localhost:9999").rstrip("/")
 app      = Server("raphi")
 
 # H1/M3: Shared secret between MCP server and FastAPI backend
@@ -42,11 +47,7 @@ _INTERNAL_TOKEN = os.environ.get("RAPHI_INTERNAL_TOKEN", "")
 # M1: Strict ticker allowlist regex — A–Z (1–5), optional class suffix (e.g. BRK.B)
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:\.[A-Z])?$")
 
-# Figma integration (MCP-backed):
-# - FIGMA_ACCESS_TOKEN: Personal access token / OAuth bearer
-# - FIGMA_FILE_KEY: default file key for read/write operations
-_FIGMA_TOKEN = os.environ.get("FIGMA_ACCESS_TOKEN", "").strip()
-_FIGMA_FILE_KEY = os.environ.get("FIGMA_FILE_KEY", "").strip()
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
@@ -130,6 +131,17 @@ def _tool_ttl(name: str) -> int:
 def _sanitize_scope(value: str) -> str:
     clean = re.sub(r"[^a-zA-Z0-9_.:@+-]", "_", str(value or "").strip())
     return clean[:128] if clean else ""
+
+
+def _kg_record(ticker: str) -> None:
+    """Fire-and-forget: record a QUERIED edge in the knowledge graph."""
+    if _kg is None or not _kg.configured:
+        return
+    try:
+        user_email = os.environ.get("RAPHI_MEMORY_USER_ID", "local-user")
+        _kg.record_query(user_email, ticker)
+    except Exception:
+        pass
 
 
 def _tool_scope(name: str, arguments: dict) -> str:
@@ -233,50 +245,6 @@ def _get_headers() -> dict:
     return headers
 
 
-def _figma_headers() -> dict:
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if _FIGMA_TOKEN:
-        headers["X-Figma-Token"] = _FIGMA_TOKEN
-    return headers
-
-
-def _resolve_figma_file_key(arguments: dict) -> str:
-    key = str(arguments.get("file_key") or _FIGMA_FILE_KEY).strip()
-    if not key:
-        raise ValueError("Figma file key missing. Set FIGMA_FILE_KEY or pass file_key.")
-    return key
-
-
-def _count_frames(node: dict) -> int:
-    """Count FRAME nodes in a Figma subtree."""
-    if not isinstance(node, dict):
-        return 0
-    count = 1 if node.get("type") == "FRAME" else 0
-    for child in node.get("children") or []:
-        count += _count_frames(child)
-    return count
-
-
-async def _figma_get(path: str, params: dict | None = None) -> dict:
-    if not _FIGMA_TOKEN:
-        raise ValueError("FIGMA_ACCESS_TOKEN is not set. Configure it in environment.")
-    query = f"?{urlencode(params)}" if params else ""
-    url = f"https://api.figma.com{path}{query}"
-    async with httpx.AsyncClient(headers=_figma_headers(), timeout=60.0) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.json()
-
-
-async def _figma_post(path: str, payload: dict) -> dict:
-    if not _FIGMA_TOKEN:
-        raise ValueError("FIGMA_ACCESS_TOKEN is not set. Configure it in environment.")
-    url = f"https://api.figma.com{path}"
-    async with httpx.AsyncClient(headers=_figma_headers(), timeout=60.0) as client:
-        r = await client.post(url, json=payload)
-        r.raise_for_status()
-        return r.json()
-
 
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
@@ -366,7 +334,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="ml_signal",
-            description="XGBoost+LSTM ensemble trading signal with SHAP feature explainability. Includes GNN blend when the graph model is trained.",
+            description="XGBoost+GB ensemble trading signal with SHAP feature explainability. Includes GNN blend when the graph model is trained.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -451,87 +419,7 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["q"],
             },
         ),
-        types.Tool(
-            name="figma_status",
-            description="Check whether Figma MCP connection is configured via environment variables.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-        ),
-        types.Tool(
-            name="figma_get_file",
-            description="Fetch Figma file metadata and document tree (optional depth and IDs).",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_key": {"type": "string", "description": "Figma file key (optional if FIGMA_FILE_KEY is set)."},
-                    "depth": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Optional node depth limit."},
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional list of node IDs to restrict payload.",
-                    },
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="figma_design_summary",
-            description="Compact design diagnostics: page names and frame counts with a deterministic design_present flag.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_key": {"type": "string", "description": "Figma file key (optional if FIGMA_FILE_KEY is set)."},
-                    "depth": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 4,
-                        "default": 2,
-                        "description": "Tree depth used for summary extraction. Lower is lighter and less rate-limit prone.",
-                    },
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="figma_get_nodes",
-            description="Fetch specific nodes from a Figma file by node IDs.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_key": {"type": "string", "description": "Figma file key (optional if FIGMA_FILE_KEY is set)."},
-                    "ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of node IDs.",
-                    },
-                },
-                "required": ["ids"],
-            },
-        ),
-        types.Tool(
-            name="figma_get_comments",
-            description="Retrieve comments for a Figma file.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_key": {"type": "string", "description": "Figma file key (optional if FIGMA_FILE_KEY is set)."}
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="figma_post_comment",
-            description="Create a comment in a Figma file at a given x,y position.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_key": {"type": "string", "description": "Figma file key (optional if FIGMA_FILE_KEY is set)."},
-                    "message": {"type": "string", "maxLength": 2000},
-                    "x": {"type": "number"},
-                    "y": {"type": "number"},
-                },
-                "required": ["message", "x", "y"],
-            },
-        ),        # ── Live SEC EDGAR ─────────────────────────────────────────────────────
+        # ── Live SEC EDGAR ─────────────────────────────────────────────────────
         types.Tool(
             name="edgar_live_filings",
             description=(
@@ -711,6 +599,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     arguments=clean_args,
                     producer=lambda: _http_get_json(client, f"/api/stock/{ticker}"),
                 )
+                _kg_record(ticker)
 
             elif name == "stock_news":
                 ticker = _validate_ticker(arguments["ticker"])
@@ -729,6 +618,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     arguments=clean_args,
                     producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/filings"),
                 )
+                _kg_record(ticker)
 
             elif name == "sec_search":
                 q = str(arguments.get("q", ""))[:200]   # cap search query length
@@ -771,6 +661,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     arguments=clean_args,
                     producer=lambda: _http_get_json(client, f"/api/stock/{ticker}/signals"),
                 )
+                _kg_record(ticker)
 
             elif name == "gnn_signal":
                 ticker = _validate_ticker(arguments["ticker"])
@@ -836,96 +727,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                     arguments=clean_args,
                     producer=lambda: _http_get_json(client, "/api/memory/retrieve", params=clean_args),
                 )
-
-            elif name == "figma_status":
-                data = {
-                    "connected": bool(_FIGMA_TOKEN),
-                    "file_key_configured": bool(_FIGMA_FILE_KEY),
-                    "required_env": ["FIGMA_ACCESS_TOKEN", "FIGMA_FILE_KEY"],
-                }
-                text = json.dumps(data, default=str)
-                return [types.TextContent(type="text", text=text)]
-
-            elif name == "figma_get_file":
-                file_key = _resolve_figma_file_key(arguments)
-                params: dict[str, str] = {}
-                if arguments.get("depth") is not None:
-                    params["depth"] = str(min(max(int(arguments["depth"]), 1), 10))
-                ids = arguments.get("ids") or []
-                if ids:
-                    params["ids"] = ",".join(str(i) for i in ids[:100])
-                data = await _figma_get(f"/v1/files/{file_key}", params=params or None)
-                text = json.dumps(data, default=str)
-                if len(text) > 8000:
-                    text = text[:8000] + "...(truncated)"
-                return [types.TextContent(type="text", text=text)]
-
-            elif name == "figma_design_summary":
-                file_key = _resolve_figma_file_key(arguments)
-                depth = min(max(int(arguments.get("depth", 2)), 1), 4)
-                data = await _figma_get(f"/v1/files/{file_key}", params={"depth": str(depth)})
-
-                pages = []
-                frame_total = 0
-                node_total = 0
-                for page in (data.get("document", {}) or {}).get("children", []) or []:
-                    children = page.get("children") or []
-                    child_count = len(children)
-                    frame_count = _count_frames(page)
-                    frame_total += frame_count
-                    node_total += child_count
-                    pages.append({
-                        "id": page.get("id"),
-                        "name": page.get("name"),
-                        "frame_count": frame_count,
-                        "child_count": child_count,
-                    })
-
-                summary = {
-                    "file_key": file_key,
-                    "file_name": data.get("name"),
-                    "last_modified": data.get("lastModified"),
-                    "page_count": len(pages),
-                    "frame_total": frame_total,
-                    "design_present": bool(frame_total > 0 or node_total > 0),
-                    "pages": pages,
-                    "note": "Summary mode keeps payload small to reduce 429 rate-limit risk.",
-                }
-                return [types.TextContent(type="text", text=json.dumps(summary, default=str))]
-
-            elif name == "figma_get_nodes":
-                file_key = _resolve_figma_file_key(arguments)
-                ids = [str(i).strip() for i in (arguments.get("ids") or []) if str(i).strip()]
-                if not ids:
-                    raise ValueError("figma_get_nodes requires at least one node id.")
-                params = {"ids": ",".join(ids[:100])}
-                data = await _figma_get(f"/v1/files/{file_key}/nodes", params=params)
-                text = json.dumps(data, default=str)
-                if len(text) > 8000:
-                    text = text[:8000] + "...(truncated)"
-                return [types.TextContent(type="text", text=text)]
-
-            elif name == "figma_get_comments":
-                file_key = _resolve_figma_file_key(arguments)
-                data = await _figma_get(f"/v1/files/{file_key}/comments")
-                text = json.dumps(data, default=str)
-                if len(text) > 8000:
-                    text = text[:8000] + "...(truncated)"
-                return [types.TextContent(type="text", text=text)]
-
-            elif name == "figma_post_comment":
-                file_key = _resolve_figma_file_key(arguments)
-                message = str(arguments.get("message", "")).strip()[:2000]
-                if not message:
-                    raise ValueError("figma_post_comment requires a non-empty message.")
-                x = float(arguments.get("x"))
-                y = float(arguments.get("y"))
-                payload = {"message": message, "client_meta": {"x": x, "y": y}}
-                data = await _figma_post(f"/v1/files/{file_key}/comments", payload)
-                text = json.dumps(data, default=str)
-                if len(text) > 8000:
-                    text = text[:8000] + "...(truncated)"
-                return [types.TextContent(type="text", text=text)]
 
             # ── Live SEC EDGAR tools ───────────────────────────────────────────
             elif name == "edgar_live_filings":

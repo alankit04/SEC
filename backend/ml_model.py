@@ -72,7 +72,15 @@ FEATURE_LABELS = {
 
 
 # ──────────────────────────────────────────────────────────────────────
-def _features(hist: pd.DataFrame, fundamentals: dict) -> pd.DataFrame:
+def compute_features(
+    hist: pd.DataFrame,
+    pe: float = 25.0,
+    rev_growth: float = 0.0,
+) -> pd.DataFrame:
+    """Compute the 12 RAPHI technical + fundamental features for one ticker.
+
+    Shared with gnn_model — single source of truth for the feature pipeline.
+    """
     df = hist.copy()
 
     # RSI-14
@@ -85,15 +93,12 @@ def _features(hist: pd.DataFrame, fundamentals: dict) -> pd.DataFrame:
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     macd  = ema12 - ema26
-    sig   = macd.ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = macd - sig
+    df["macd_hist"] = macd - macd.ewm(span=9, adjust=False).mean()
 
     # Bollinger % position  (0 = lower band, 1 = upper band)
-    sma20  = df["Close"].rolling(20).mean()
-    std20  = df["Close"].rolling(20).std()
-    lower  = sma20 - 2 * std20
-    upper  = sma20 + 2 * std20
-    df["bb_pct"] = (df["Close"] - lower) / (upper - lower + 1e-9)
+    sma20 = df["Close"].rolling(20).mean()
+    std20 = df["Close"].rolling(20).std()
+    df["bb_pct"] = (df["Close"] - (sma20 - 2 * std20)) / (4 * std20 + 1e-9)
 
     # Momentum
     df["mom_5d"]  = df["Close"].pct_change(5)
@@ -101,21 +106,24 @@ def _features(hist: pd.DataFrame, fundamentals: dict) -> pd.DataFrame:
     df["mom_50d"] = df["Close"].pct_change(50)
 
     # Volume ratio
-    vol_ma = df["Volume"].rolling(20).mean()
-    df["vol_ratio"] = df["Volume"] / (vol_ma + 1e-9)
+    df["vol_ratio"] = df["Volume"] / (df["Volume"].rolling(20).mean() + 1e-9)
 
     # Returns & volatility
     df["ret_5d"]    = df["Close"].pct_change(5)
     df["ret_20d"]   = df["Close"].pct_change(20)
     df["volatility"] = df["Close"].pct_change().rolling(20).std()
 
-    # Fundamental features (scalar, broadcast)
-    pe  = fundamentals.get("pe_ratio") or 25
-    df["pe_norm"]    = float((pe - 25) / 15)         # z-score around market avg
-    rg  = fundamentals.get("revenue_growth") or 0
-    df["rev_growth"] = float(rg / 100 if abs(rg) > 1 else rg)
+    # Fundamental features (scalar broadcast)
+    df["pe_norm"]    = float((pe - 25) / 15)
+    df["rev_growth"] = float(rev_growth / 100 if abs(rev_growth) > 1 else rev_growth)
 
     return df[FEATURE_NAMES].dropna()
+
+
+def _features(hist: pd.DataFrame, fundamentals: dict) -> pd.DataFrame:
+    pe = float(fundamentals.get("pe_ratio") or 25)
+    rg = float(fundamentals.get("revenue_growth") or 0)
+    return compute_features(hist, pe=pe, rev_growth=rg)
 
 
 def _labels(hist: pd.DataFrame, idx) -> pd.Series:
@@ -188,28 +196,28 @@ class SignalEngine:
             xgb_model.fit(Xtr, ytr)
             xgb_acc = float((xgb_model.predict(Xte) == yte).mean())
 
-        # ── "LSTM" (GB with rolling-window encoding) ───────────────────
-        lstm_model = GradientBoostingClassifier(
+        # ── GB ensemble diversifier (sklearn GradientBoosting, different hypers) ──
+        gb2_model = GradientBoostingClassifier(
             n_estimators=150, max_depth=3, learning_rate=0.08,
             subsample=0.75, random_state=7,
         )
-        lstm_model.fit(Xtr, ytr)
-        lstm_acc = float((lstm_model.predict(Xte) == yte).mean())
+        gb2_model.fit(Xtr, ytr)
+        gb2_acc = float((gb2_model.predict(Xte) == yte).mean())
 
         # ── Prediction on latest row ────────────────────────────────────
         latest = X.iloc[[-1]]
         xgb_p  = xgb_model.predict_proba(latest)[0]
-        lstm_p = lstm_model.predict_proba(latest)[0]
+        gb2_p  = gb2_model.predict_proba(latest)[0]
 
-        # ── XGBoost + LSTM ensemble ─────────────────────────────────────
-        ensemble_p = (xgb_p + lstm_p) / 2
+        # ── XGBoost + GB2 ensemble ──────────────────────────────────────
+        ensemble_p = (xgb_p + gb2_p) / 2
 
         # ── Distilled and quantized local student models ─────────────────
         optimization_extra: dict = {}
         try:
             teacher_train = (
                 xgb_model.predict_proba(Xtr)[:, 1] +
-                lstm_model.predict_proba(Xtr)[:, 1]
+                gb2_model.predict_proba(Xtr)[:, 1]
             ) / 2
             student = DistilledStudent().fit(Xtr.values, teacher_train)
 
@@ -234,7 +242,7 @@ class SignalEngine:
             optimization_extra.update({
                 "distilled_student": {
                     "available": True,
-                    "teacher": "xgb_lstm_ensemble",
+                    "teacher": "xgb_gb2_ensemble",
                     "direction": student_dir,
                     "confidence": round(float(max(student_latest)) * 100, 1),
                     "accuracy": round(student_acc * 100, 1),
@@ -268,7 +276,7 @@ class SignalEngine:
                     gnn_p = gnn_eng._model.predict_proba(
                         gnn_eng._graph.features, gnn_eng._graph.adj
                     )[idx_gnn]                              # [p_hold, p_long]
-                    # Weighted ensemble: XGB+LSTM 60%, GNN 40%
+                    # Weighted ensemble: XGB+GB2 60%, GNN 40%
                     ensemble_p = 0.6 * ensemble_p + 0.4 * gnn_p
                     gnn_dir = (
                         "LONG"  if gnn_p[1] > 0.55 else
@@ -334,8 +342,8 @@ class SignalEngine:
             "direction":         direction,
             "confidence":        round(confidence * 100, 1),
             "xgb_accuracy":      round(xgb_acc  * 100, 1),
-            "lstm_accuracy":     round(lstm_acc  * 100, 1),
-            "ensemble_accuracy": round((xgb_acc + lstm_acc) / 2 * 100, 1),
+            "gb2_accuracy":      round(gb2_acc   * 100, 1),
+            "ensemble_accuracy": round((xgb_acc + gb2_acc) / 2 * 100, 1),
             "shap_values":       shap_values,
             "feature_values":    feature_vals,
             "trained_at":        pd.Timestamp.now().isoformat(),

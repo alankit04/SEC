@@ -41,10 +41,10 @@ gnn       = GNNSignalEngine.get(sec)   # shares SEC data for SIC lookups
 app = FastAPI(title="RAPHI API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://localhost:9999", "http://127.0.0.1:9999"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Internal-Token"],
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -58,7 +58,7 @@ def root():
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 SETTINGS_FILE = BASE / "settings.json"
-DEFAULT_WATCHLIST = ["NVDA", "AAPL", "MSFT", "META", "TSLA", "AMZN", "GOOGL"]
+DEFAULT_WATCHLIST: list[str] = []
 
 
 def load_settings() -> dict:
@@ -296,7 +296,7 @@ def model_performance():
     settings  = load_settings()
     watchlist = settings.get("watchlist", DEFAULT_WATCHLIST)
     models    = []
-    xgb_accs, lstm_accs = [], []
+    xgb_accs, gb2_accs = [], []
 
     for t in watchlist:
         f = BASE / ".model_cache" / f"{t}.pkl"
@@ -306,11 +306,11 @@ def model_performance():
             with open(f, "rb") as fh:
                 r = pickle.load(fh)
             xgb_accs.append(r.get("xgb_accuracy", 0))
-            lstm_accs.append(r.get("lstm_accuracy", 0))
+            gb2_accs.append(r.get("gb2_accuracy", 0))
             models.append({
                 "ticker":    t,
                 "xgb_acc":   r.get("xgb_accuracy"),
-                "lstm_acc":  r.get("lstm_accuracy"),
+                "gb2_acc":   r.get("gb2_accuracy"),
                 "ens_acc":   r.get("ensemble_accuracy"),
                 "n_train":   r.get("n_train"),
                 "trained_at": r.get("trained_at"),
@@ -318,15 +318,15 @@ def model_performance():
         except Exception:
             pass
 
-    avg_xgb  = round(sum(xgb_accs)  / len(xgb_accs),  1) if xgb_accs  else None
-    avg_lstm = round(sum(lstm_accs) / len(lstm_accs), 1) if lstm_accs else None
-    avg_ens  = round((avg_xgb + avg_lstm) / 2, 1) if avg_xgb and avg_lstm else None
+    avg_xgb = round(sum(xgb_accs) / len(xgb_accs), 1) if xgb_accs else None
+    avg_gb2 = round(sum(gb2_accs) / len(gb2_accs), 1) if gb2_accs else None
+    avg_ens = round((avg_xgb + avg_gb2) / 2, 1) if avg_xgb and avg_gb2 else None
 
     return {
-        "models":       models,
-        "avg_xgb_acc":  avg_xgb,
-        "avg_lstm_acc": avg_lstm,
-        "avg_ens_acc":  avg_ens,
+        "models":      models,
+        "avg_xgb_acc": avg_xgb,
+        "avg_gb2_acc": avg_gb2,
+        "avg_ens_acc": avg_ens,
     }
 
 
@@ -469,7 +469,7 @@ Format your response with clear sections when appropriate."""
         ("orchestrator", "Orchestrator Agent — query parsed, routing to analysts"),
         ("market",       f"Market Data Agent — {ticker} price, volume, technicals loaded"),
         ("news",         "News Agent — sentiment analysis across recent articles"),
-        ("predict",      "Signal Agent — XGBoost + LSTM ensemble computing"),
+        ("predict",      "Signal Agent — XGBoost + GB ensemble computing"),
         ("synthesize",   "Synthesis Agent — generating response"),
     ]
     for step_id, label in steps:
@@ -545,7 +545,7 @@ Write a professional investment memo with these exact sections:
 1. EXECUTIVE SUMMARY — recommendation (BUY/SELL/HOLD), confidence, price target, 90-day expected return
 2. BULL CASE (probability %) — key catalysts
 3. BEAR CASE (probability %) — key risks
-4. MODEL VALIDATION — XGBoost/LSTM consensus, SHAP key drivers, falsifiability condition
+4. MODEL VALIDATION — XGBoost/GB ensemble consensus, SHAP key drivers, falsifiability condition
 5. TRADE PARAMETERS — entry range, price target, stop-loss, position sizing, horizon
 
 Use precise numbers. Be direct. Institutional style."""

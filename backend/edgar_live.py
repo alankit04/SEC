@@ -31,9 +31,12 @@ _HEADERS = {
 _RATE_LIMIT_SLEEP = 0.12   # 120 ms between requests → ~8 req/s (under 10 limit)
 
 # Cache TTLs (seconds)
-_SUBMISSION_TTL   = 3600   # company submissions: 1 hour
-_FILING_TEXT_TTL  = 7200   # filing text: 2 hours
-_SEARCH_TTL       = 900    # EFTS search results: 15 minutes
+_SUBMISSION_TTL   = 300    # 5 minutes — always fetch near-fresh filings
+_FILING_TEXT_TTL  = 600    # 10 minutes — filing prose is stable but respect server load
+_SEARCH_TTL       = 120    # 2 minutes
+
+_MAX_RETRIES = 3
+_RETRY_BASE  = 1.0   # seconds; doubled each retry on 429
 
 _cache: dict[str, tuple[float, object]] = {}
 _last_request_ts = 0.0
@@ -59,19 +62,27 @@ def _store(key: str, value) -> None:
 
 
 def _get(url: str, params: dict | None = None, timeout: float = 30.0) -> dict | list | None:
-    """GET with rate limiting and error handling. Returns parsed JSON or None."""
-    _rate_limit()
-    try:
-        with httpx.Client(headers=_HEADERS, timeout=timeout, follow_redirects=True) as client:
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            return resp.json()
-    except httpx.HTTPStatusError as exc:
-        logger.warning("EDGAR HTTP %s for %s", exc.response.status_code, url)
-        return None
-    except Exception as exc:
-        logger.warning("EDGAR request failed: %s — %s", url, exc)
-        return None
+    """GET with rate limiting, 429 back-off retry, and error handling. Returns parsed JSON or None."""
+    for attempt in range(_MAX_RETRIES):
+        _rate_limit()
+        try:
+            with httpx.Client(headers=_HEADERS, timeout=timeout, follow_redirects=True) as client:
+                resp = client.get(url, params=params)
+                if resp.status_code == 429:
+                    wait = float(resp.headers.get("Retry-After", _RETRY_BASE * (2 ** attempt)))
+                    logger.warning("EDGAR 429 — waiting %.1fs (attempt %d/%d): %s", wait, attempt + 1, _MAX_RETRIES, url)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("EDGAR HTTP %s for %s", exc.response.status_code, url)
+            return None
+        except Exception as exc:
+            logger.warning("EDGAR request failed: %s — %s", url, exc)
+            return None
+    logger.warning("EDGAR gave up after %d retries (429): %s", _MAX_RETRIES, url)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -264,19 +275,29 @@ def get_filing_text(
 
     text = None
     for url in urls_to_try:
-        _rate_limit()
-        try:
-            with httpx.Client(headers=_HEADERS, timeout=30.0, follow_redirects=True) as client:
-                resp = client.get(url)
-                if resp.status_code == 200:
-                    raw = resp.text
-                    # Strip HTML tags
-                    text = re.sub(r"<[^>]+>", " ", raw)
-                    text = re.sub(r"&[a-z]+;", " ", text)
-                    text = re.sub(r"\s{3,}", "\n\n", text).strip()
-                    break
-        except Exception as exc:
-            logger.debug("Filing text fetch failed for %s: %s", url, exc)
+        for attempt in range(_MAX_RETRIES):
+            _rate_limit()
+            try:
+                with httpx.Client(headers=_HEADERS, timeout=30.0, follow_redirects=True) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 429:
+                        wait = float(resp.headers.get("Retry-After", _RETRY_BASE * (2 ** attempt)))
+                        logger.warning("EDGAR 429 — waiting %.1fs (attempt %d/%d): %s", wait, attempt + 1, _MAX_RETRIES, url)
+                        time.sleep(wait)
+                        continue
+                    if resp.status_code == 200:
+                        raw = resp.text
+                        # Strip HTML tags
+                        text = re.sub(r"<[^>]+>", " ", raw)
+                        text = re.sub(r"&[a-z]+;", " ", text)
+                        text = re.sub(r"\s{3,}", "\n\n", text).strip()
+                        break
+                    break  # non-200, non-429: try next URL candidate
+            except Exception as exc:
+                logger.debug("Filing text fetch failed for %s: %s", url, exc)
+                break
+        if text:
+            break
 
     if text:
         # Truncate cleanly at sentence boundary
