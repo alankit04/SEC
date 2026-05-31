@@ -317,69 +317,17 @@ def sanitize_user_input(text: str) -> str:
     return text
 
 
-# ── Sentry integration ────────────────────────────────────────────────
+# ── Sentry integration (disabled — no SENTRY_DSN configured) ─────────
 def init_sentry() -> None:
-    """
-    Initialize Sentry SDK.
-    Set SENTRY_DSN env var from https://raphi.sentry.io → Settings → Projects → DSN
-    """
-    dsn = os.environ.get("SENTRY_DSN", "")
-    if not dsn:
-        logger.info("SENTRY_DSN not configured — Sentry monitoring disabled")
-        return
-
-    try:
-        import sentry_sdk
-        from sentry_sdk.integrations.asyncio import AsyncioIntegration
-        from sentry_sdk.integrations.logging import LoggingIntegration
-
-        sentry_sdk.init(
-            dsn=dsn,
-            environment=os.environ.get("RAPHI_ENV", "development"),
-            release=os.environ.get("RAPHI_VERSION", "1.0.0"),
-            traces_sample_rate=0.0,
-            profiles_sample_rate=0.0,
-            # Disable auto-detection of FastAPI/Starlette — incompatible with FastAPI 0.115+
-            auto_enabling_integrations=False,
-            integrations=[
-                LoggingIntegration(),
-                AsyncioIntegration(),
-            ],
-            before_send=_scrub_sensitive_data,
-            send_default_pii=False,
-        )
-        logger.info("Sentry initialized → raphi.sentry.io")
-    except ImportError:
-        logger.warning("sentry-sdk not installed — run: pip install sentry-sdk[starlette]")
+    """No-op. Sentry is not used; kept so call sites in raphi_server/a2a_server don't break."""
 
 
 def _capture_security_event(message: str, level: str = "warning", **extras) -> None:
-    """Send a security event to Sentry if SDK is initialised, else just log."""
-    try:
-        import sentry_sdk
-        with sentry_sdk.new_scope() as scope:
-            for k, v in extras.items():
-                scope.set_extra(k, str(v)[:500])  # cap extra value size
-            sentry_sdk.capture_message(message, level=level, scope=scope)
-    except Exception:
-        pass  # Never let Sentry errors crash the app
-
-
-def _scrub_sensitive_data(event, hint):
-    """
-    Sentry before_send hook — redact API keys and portfolio dollar amounts
-    before any event leaves this machine.
-    """
-    for section in ("extra", "contexts", "tags"):
-        block = event.get(section, {})
-        if isinstance(block, dict):
-            for key in list(block.keys()):
-                val = str(block.get(key, ""))
-                if re.search(r"sk-ant", val, re.IGNORECASE):
-                    block[key] = "[API_KEY_REDACTED]"
-                elif re.search(r"\$[\d,]{4,}", val):
-                    block[key] = "[FINANCIAL_VALUE_REDACTED]"
-    return event
+    """Log security events locally only."""
+    extra_str = " ".join(f"{k}={str(v)[:200]}" for k, v in extras.items())
+    getattr(logger, level if level in ("debug", "info", "warning", "error") else "warning")(
+        "SECURITY: %s %s", message, extra_str
+    )
 
 
 # ── H3: Fernet encryption for sessions.json ──────────────────────────
