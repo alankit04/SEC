@@ -355,6 +355,15 @@ class SignalEngine:
         return result
 
     # ------------------------------------------------------------------
+    def force_retrain(self, ticker: str, fundamentals: dict) -> dict:
+        """Bypass cache and force fresh training."""
+        self._mem.pop(ticker, None)
+        path = MODEL_DIR / f"{ticker}.pkl"
+        if path.exists():
+            path.unlink(missing_ok=True)
+        return self.train_and_predict(ticker, fundamentals)
+
+    # ------------------------------------------------------------------
     def multi_signals(self, tickers: list, fund_map: dict) -> list:
         # ── trigger GNN batch prediction so the cache is warm ──────────
         try:

@@ -3,7 +3,7 @@ raphi_mcp_server.py — RAPHI MCP Server (stdio transport)
 
 Security fixes applied:
     H1 / M3  X-Internal-Token header on every httpx call to FastAPI (set RAPHI_INTERNAL_TOKEN)
-    M1        Ticker symbol validated against strict regex ^[A-Z]{1,5}(?:\.[A-Z])?$ before use in URLs
+    M1        Ticker symbol validated against strict regex ^[A-Z]{1,5}(?:\\.[A-Z])?$ before use in URLs
 
 Requires the unified RAPHI server to be running on :9999.
 

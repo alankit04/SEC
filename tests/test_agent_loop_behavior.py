@@ -1,3 +1,4 @@
+import types
 import pytest
 from raphi.orchestrators.agent_loop import run_agentic_query
 
@@ -90,7 +91,7 @@ def test_self_heal_retries():
         state.retrieval_results = {"fail_tool": "success after retry"}
         return state
     def fake_reflect(state):
-        if getattr(state, "retry_count", 0) < 1:
+        if getattr(state, "retry_count", 0) <= 1:
             return types.SimpleNamespace(passed=False, issues=[{"tool": "fail_tool"}], retryable=True, suggested_plan_changes=[])
         return types.SimpleNamespace(passed=True, issues=[], retryable=False, suggested_plan_changes=[])
     orig_execute_plan = getattr(agent_loop, "execute_plan", None)

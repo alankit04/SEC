@@ -34,6 +34,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import uvicorn
@@ -134,6 +135,10 @@ portfolio = PortfolioManager()
 memory    = get_graph_memory()
 gnn       = GNNSignalEngine.get(sec)
 citations = get_citation_index()
+
+from autonomy_controller import AutonomyController
+autonomy = AutonomyController()
+_monitor_jobs: dict[str, dict] = {}
 
 # ── Lightweight TTL cache for market data (avoids repeated yfinance round-trips) ──
 import threading as _threading
@@ -1869,6 +1874,139 @@ def models_optimization(request: Request):
 def models_rl_update(request: Request):
     _enforce_side_effect_approval(request, "models_rl_update")
     return optimize_from_conviction_ledger(CONVICTIONS_FILE, RESOLUTIONS_FILE)
+
+
+# ── autonomy controller ────────────────────────────────────────────────
+def _append_retraining_record(record: dict) -> None:
+    path = BASE / ".raphi_audit" / "retraining_log.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records: list = []
+    if path.exists():
+        try:
+            records = json.loads(path.read_text())
+        except Exception:
+            pass
+    records.append(record)
+    path.write_text(json.dumps(records[-500:], indent=2))
+
+
+@api.get("/autonomy/status")
+@limiter.limit("60/minute")
+def autonomy_status(request: Request):
+    return autonomy.status()
+
+
+class _BehaviorEvent(BaseModel):
+    event_type: str
+    metadata: dict = {}
+
+
+@api.post("/autonomy/behavior")
+@limiter.limit("60/minute")
+def autonomy_behavior(body: _BehaviorEvent, request: Request):
+    _, _, user_scope = _request_identity_scope(request)
+    meta = {k: v for k, v in body.metadata.items() if k != "raw_text"}
+    autonomy.learn_from_behavior(user_scope=user_scope, event_type=body.event_type, metadata=meta)
+    return autonomy.behavior_profile(user_scope)
+
+
+class _RetrainRequest(BaseModel):
+    source: str = "watchlist"
+    background: bool = False
+    include_gnn: bool = True
+    max_tickers: int = 10
+
+
+@api.post("/models/retrain")
+@limiter.limit("10/minute")
+def models_retrain(body: _RetrainRequest, request: Request):
+    _enforce_side_effect_approval(request, "models_retrain")
+    _, _, user_scope = _request_identity_scope(request)
+
+    if body.source == "behavior":
+        profile = autonomy.behavior_profile(user_scope)
+        tickers = profile.get("preferred_tickers", [])[:body.max_tickers]
+    else:
+        settings = _load_settings_for_scope(user_scope)
+        tickers = [_ticker_symbol(t) for t in settings.get("watchlist", [])[:body.max_tickers]]
+
+    if not tickers:
+        return {"status": "no_tickers", "universe_source": body.source, "tickers": []}
+
+    results = []
+    for ticker in tickers:
+        try:
+            detail = market.stock_detail(ticker)
+            funds = {
+                "pe_ratio":       detail.get("pe_ratio")       if isinstance(detail, dict) else None,
+                "revenue_growth": detail.get("revenue_growth") if isinstance(detail, dict) else None,
+            }
+            r = engine.force_retrain(ticker, funds)
+            results.append(r)
+        except Exception as exc:
+            results.append({"ticker": ticker, "error": str(exc)})
+
+    if body.include_gnn:
+        try:
+            gnn.ensure_trained(tickers, force=True)
+        except Exception:
+            pass
+
+    record = {
+        "triggered_at": _now_str(),
+        "source": body.source,
+        "tickers": tickers,
+        "results": results,
+        "rl_update": optimize_from_conviction_ledger(CONVICTIONS_FILE, RESOLUTIONS_FILE),
+    }
+    _append_retraining_record(record)
+    return {"status": "trained", "universe_source": body.source, "tickers": tickers, "results": results}
+
+
+class _MonitorStartRequest(BaseModel):
+    ticker: str
+    duration_s: int = 300
+    poll_interval_s: int = 30
+    intent: str = "monitor"
+
+
+@api.post("/autonomy/monitor/start")
+@limiter.limit("20/minute")
+def autonomy_monitor_start(body: _MonitorStartRequest, request: Request):
+    _enforce_side_effect_approval(request, "autonomy_monitor_start")
+    job_id = str(uuid.uuid4())
+    _monitor_jobs[job_id] = {
+        "job_id":          job_id,
+        "ticker":          _ticker_symbol(body.ticker),
+        "duration_s":      body.duration_s,
+        "poll_interval_s": body.poll_interval_s,
+        "intent":          body.intent,
+        "status":          "running",
+        "started_at":      _now_str(),
+        "stopped_at":      None,
+    }
+    return _monitor_jobs[job_id]
+
+
+@api.get("/autonomy/monitor/jobs/{job_id}")
+@limiter.limit("60/minute")
+def autonomy_monitor_job(job_id: str, request: Request):
+    job = _monitor_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Monitor job {job_id!r} not found.")
+    return job
+
+
+@api.post("/autonomy/monitor/jobs/{job_id}/stop")
+@limiter.limit("20/minute")
+def autonomy_monitor_stop(job_id: str, request: Request):
+    _enforce_side_effect_approval(request, "autonomy_monitor_stop")
+    job = _monitor_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Monitor job {job_id!r} not found.")
+    job["status"] = "stopped"
+    job["stopped_at"] = _now_str()
+    return job
 
 
 @api.get("/stock/{ticker}/optimization")

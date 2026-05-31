@@ -41,6 +41,7 @@ class RecordingGraphBuilder:
             edge_dst=np.array(edge_dst, dtype=np.int64),
             adj=adj,
             sic_map={ticker: "3571" for ticker in tickers},
+            corr_mat=np.eye(n),
             built_at=time.time(),
         )
 

@@ -1,13 +1,17 @@
+import os
 import pytest
 from fastapi.testclient import TestClient
-from backend.raphi_server import app
 import uuid
 
 # Mocking policy: Patch external APIs, not core agentic logic
 import builtins
 from unittest.mock import patch
 
+os.environ.setdefault("RAPHI_API_KEY", "test-key")
+from backend.raphi_server import app
+
 client = TestClient(app)
+_H = {"X-API-Key": "test-key"}
 
 # Helper for unique run_id check
 def is_unique_run_id(run_id):
@@ -19,7 +23,7 @@ def is_unique_run_id(run_id):
 
 # SYSTEM TEST 1 — CASUAL AI QUERY
 def test_casual_ai_query():
-    resp = client.post("/api/agentic/query", json={"query": "What is RAPHI?"})
+    resp = client.post("/api/agentic/query", json={"query": "What is RAPHI?"}, headers=_H)
     assert resp.status_code == 200
     data = resp.json()
     assert data["intent"] == "casual_chat"
@@ -32,7 +36,7 @@ def test_casual_ai_query():
 # SYSTEM TEST 2 — VALID NEW TICKER FULL ANALYSIS
 def test_valid_new_ticker_full_analysis():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "PLTR", "valid": True, "company_name": "Palantir", "cik": "0001321655", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "Analyze PLTR using SEC filings and market data."})
+        resp = client.post("/api/agentic/query", json={"query": "Analyze PLTR using SEC filings and market data."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert "PLTR" in data.get("detected_tickers", [])
@@ -50,7 +54,7 @@ def test_valid_new_ticker_full_analysis():
 @pytest.mark.parametrize("ticker", ["PLTR", "NVDA", "AAPL", "MSFT", "AMD"])
 def test_generic_valid_tickers(ticker):
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": ticker, "valid": True, "company_name": ticker, "cik": "0000000000", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": f"Analyze {ticker} using SEC filings and market data."})
+        resp = client.post("/api/agentic/query", json={"query": f"Analyze {ticker} using SEC filings and market data."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert ticker in data.get("detected_tickers", [])
@@ -61,7 +65,7 @@ def test_generic_valid_tickers(ticker):
 # SYSTEM TEST 4 — INVALID TICKER BLOCKING
 def test_invalid_ticker_blocking():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "ZZZZZ", "valid": False, "company_name": None, "cik": None, "source_used": None, "errors": ["not found"]}):
-        resp = client.post("/api/agentic/query", json={"query": "Analyze ZZZZZ using SEC filings."})
+        resp = client.post("/api/agentic/query", json={"query": "Analyze ZZZZZ using SEC filings."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert "ZZZZZ" in data.get("invalid_tickers", [])
@@ -78,7 +82,7 @@ def test_invalid_ticker_blocking():
 # SYSTEM TEST 5 — USER INTENT CANNOT OVERRIDE SERVER SAFETY
 def test_user_intent_cannot_override_server_safety():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "PLTR", "valid": True, "company_name": "Palantir", "cik": "0001321655", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "Should I buy PLTR?", "intent": "research"})
+        resp = client.post("/api/agentic/query", json={"query": "Should I buy PLTR?", "intent": "research"}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert data["intent"] == "recommendation"
@@ -90,7 +94,7 @@ def test_user_intent_cannot_override_server_safety():
 # SYSTEM TEST 6 — CONFIDENCE SCORE PROVENANCE
 def test_confidence_score_provenance():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "PLTR", "valid": True, "company_name": "Palantir", "cik": "0001321655", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "Should I short PLTR with 70% confidence?"})
+        resp = client.post("/api/agentic/query", json={"query": "Should I short PLTR with 70% confidence?"}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         # 1. intent and risk
@@ -125,7 +129,7 @@ def test_confidence_score_provenance():
 # SYSTEM TEST 7 — LATEST/CURRENT CITATION FRESHNESS
 def test_latest_current_citation_freshness():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "NVDA", "valid": True, "company_name": "Nvidia", "cik": "0000320193", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "What is the latest 10-Q for NVDA and what are the current risks?"})
+        resp = client.post("/api/agentic/query", json={"query": "What is the latest 10-Q for NVDA and what are the current risks?"}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert data["intent"] in ["latest_filing", "sec_research"]
@@ -177,7 +181,7 @@ def test_stale_citation_downgrade():
         import raphi.orchestrators.tool_executor
         raphi.workflows.research_workflow.execute_plan = fake_execute_plan_with_stale_evidence
         raphi.orchestrators.tool_executor.execute_plan = fake_execute_plan_with_stale_evidence
-        resp = client.post("/api/agentic/query", json={"query": "What are the current risks for NVDA today?"})
+        resp = client.post("/api/agentic/query", json={"query": "What are the current risks for NVDA today?"}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         # 1. evidence_packets is non-empty
@@ -195,7 +199,7 @@ def test_stale_citation_downgrade():
 
 # SYSTEM TEST 9 — TRENDING STOCKS AGENTIC CONTRACT
 def test_trending_stocks_agentic_contract():
-    resp = client.post("/api/agentic/query", json={"query": "What are the top trending stocks in 2026?"})
+    resp = client.post("/api/agentic/query", json={"query": "What are the top trending stocks in 2026?"}, headers=_H)
     assert resp.status_code == 200
     data = resp.json()
     assert data["intent"] == "trending_stocks"
@@ -211,7 +215,7 @@ def test_trending_stocks_agentic_contract():
 def test_model_gnn_coverage_disclosure():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "PLTR", "valid": True, "company_name": "Palantir", "cik": "0001321655", "source_used": "company_tickers", "errors": []}):
         # Simulate GNN signal unavailable
-        resp = client.post("/api/agentic/query", json={"query": "Show me the GNN signal for PLTR."})
+        resp = client.post("/api/agentic/query", json={"query": "Show me the GNN signal for PLTR."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert data["intent"] == "model_signal"
@@ -222,11 +226,11 @@ def test_model_gnn_coverage_disclosure():
 def test_memory_persistence_already_tracked_flow():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "CRWD", "valid": True, "company_name": "CrowdStrike", "cik": "0001535527", "source_used": "company_tickers", "errors": []}):
         # First run
-        resp1 = client.post("/api/agentic/query", json={"query": "Analyze CRWD using SEC filings."})
+        resp1 = client.post("/api/agentic/query", json={"query": "Analyze CRWD using SEC filings."}, headers=_H)
         assert resp1.status_code == 200
         data1 = resp1.json()
         # Second run
-        resp2 = client.post("/api/agentic/query", json={"query": "Analyze CRWD again using market data."})
+        resp2 = client.post("/api/agentic/query", json={"query": "Analyze CRWD again using market data."}, headers=_H)
         assert resp2.status_code == 200
         data2 = resp2.json()
         assert "CRWD" in data1.get("validated_tickers", [])
@@ -238,7 +242,7 @@ def test_memory_persistence_already_tracked_flow():
 def test_tool_failure_and_self_heal():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "PLTR", "valid": True, "company_name": "Palantir", "cik": "0001321655", "source_used": "company_tickers", "errors": []}):
         # Simulate tool failure and retry by patching tool execution if needed
-        resp = client.post("/api/agentic/query", json={"query": "Analyze PLTR using latest SEC filings."})
+        resp = client.post("/api/agentic/query", json={"query": "Analyze PLTR using latest SEC filings."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("tool_trace")
@@ -249,7 +253,7 @@ def test_tool_failure_and_self_heal():
 # SYSTEM TEST 13 — RUN LOGGING / AUDITABILITY
 def test_run_logging_auditability():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "NVDA", "valid": True, "company_name": "Nvidia", "cik": "0000320193", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "Analyze NVDA using SEC filings."})
+        resp = client.post("/api/agentic/query", json={"query": "Analyze NVDA using SEC filings."}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         assert is_unique_run_id(data["run_id"])
@@ -261,7 +265,7 @@ def test_run_logging_auditability():
 # SYSTEM TEST 14 — FINAL ANSWER CONTRACT
 def test_final_answer_contract():
     with patch("raphi.memory.ticker_registry.validate_ticker", return_value={"ticker": "AAPL", "valid": True, "company_name": "Apple", "cik": "0000320193", "source_used": "company_tickers", "errors": []}):
-        resp = client.post("/api/agentic/query", json={"query": "Should I buy AAPL?"})
+        resp = client.post("/api/agentic/query", json={"query": "Should I buy AAPL?"}, headers=_H)
         assert resp.status_code == 200
         data = resp.json()
         for field in ["intent", "risk_class", "ticker_registration_status", "tool_plan", "tool_trace", "evidence_packets", "claim_citation_map", "citation_freshness_status", "final_answer"]:
@@ -273,7 +277,7 @@ def test_final_answer_contract():
 # LIVE TESTS — OPTIONAL ONLY
 @pytest.mark.live
 def test_live_sec_query():
-    resp = client.post("/api/agentic/query", json={"query": "Show me the latest 10-K for MSFT."})
+    resp = client.post("/api/agentic/query", json={"query": "Show me the latest 10-K for MSFT."}, headers=_H)
     assert resp.status_code == 200
     data = resp.json()
     assert "MSFT" in data.get("detected_tickers", [])

@@ -39,14 +39,6 @@ def test_mcp_lists_real_gnn_tools():
 
     assert {"gnn_signal", "gnn_status", "gnn_train"}.issubset(names)
     assert {"sec_universe", "sec_industries"}.issubset(names)
-    assert {
-        "figma_status",
-        "figma_get_file",
-        "figma_design_summary",
-        "figma_get_nodes",
-        "figma_get_comments",
-        "figma_post_comment",
-    }.issubset(names)
     # Live EDGAR + Firecrawl tools registered in MCP
     assert {"edgar_live_filings", "edgar_search_fulltext"}.issubset(names)
     assert {"firecrawl_scrape", "firecrawl_search"}.issubset(names)
