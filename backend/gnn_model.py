@@ -707,6 +707,18 @@ class GNNSignalEngine:
             len(self._graph.tickers),
             int((len(self._graph.edge_src) - len(self._graph.tickers)) / 2),
         )
+        # Wire Neo4j Phase 3: export cross-sector correlations after each training run
+        try:
+            from knowledge_graph import KnowledgeGraph
+            kg = KnowledgeGraph.get()
+            if kg.configured:
+                kg.seed_correlations(
+                    tickers=self._graph.tickers,
+                    corr_mat=self._graph.corr_mat,
+                    sic_map=self._graph.sic_map,
+                )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def status(self) -> dict:

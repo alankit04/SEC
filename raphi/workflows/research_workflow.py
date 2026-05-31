@@ -109,6 +109,24 @@ def run_research_workflow(state: WorkflowState) -> WorkflowState:
     state = collect_dynamic_evidence(state)
     if state.reflection is None:
         state.reflection = reflect(state)
+    # M33: Populate model_signals from ml_signal tool results
+    from raphi.orchestrators.state import ModelSignal
+    for step in state.tool_plan:
+        if step.tool_name == "ml_signal":
+            res = state.retrieval_results.get(step.id, {})
+            if isinstance(res, dict) and not res.get("error") and res.get("direction"):
+                ticker = res.get("ticker", step.args.get("ticker", ""))
+                state.model_signals.append(ModelSignal(
+                    ticker=ticker,
+                    model_name="XGBoost+GB2+GNN",
+                    model_version="ensemble",
+                    signal=res.get("direction", "HOLD"),
+                    confidence=float(res.get("confidence", 0)) / 100.0 if res.get("confidence") else None,
+                    source=res.get("provider", "SignalEngine"),
+                    features=res.get("shap_values", {}),
+                    timestamp=res.get("trained_at") or res.get("retrieved_at") or now,
+                    limitations=[],
+                ))
     # 4. Evaluate citation freshness for each evidence packet and write back
     freshness_req = infer_freshness_requirement(state.user_query, state.intent)
     status_list = []
@@ -126,7 +144,7 @@ def run_research_workflow(state: WorkflowState) -> WorkflowState:
         set_field(ep, "stale_reason", result.stale_reason)
         set_field(ep, "refresh_attempted", should_refresh_citation(result))
         set_field(ep, "refresh_successful", False)
-        set_field(ep, "citation_age_hours", result.age_hours if hasattr(ep, "citation_age_hours") or (isinstance(ep, dict) and "citation_age_hours" in ep) else None)
+        set_field(ep, "citation_age_hours", result.age_hours)
         status_list.append({
             "evidence_id": get_field(ep, "evidence_id"),
             "freshness_status": result.freshness_status,

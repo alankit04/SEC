@@ -600,7 +600,10 @@ def _gnn_universe(*extra_tickers: str, requested: Optional[list[str]] = None, us
     universe: list[str] = []
     seen: set[str] = set()
     for raw in [*extra_tickers, *(requested or []), *_watchlist(user_scope)]:
-        ticker = _ticker_symbol(raw)
+        try:
+            ticker = _ticker_symbol(raw)
+        except HTTPException:
+            continue
         if ticker not in seen:
             universe.append(ticker)
             seen.add(ticker)
@@ -4267,6 +4270,8 @@ class AgenticQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4000)
     history: list = Field(default_factory=list)
     user_context: dict = Field(default_factory=dict)
+    tickers: list = Field(default_factory=list)
+    universe: list = Field(default_factory=list)
 
 
 @api.post("/agentic/query")
@@ -4280,10 +4285,17 @@ async def agentic_query(req: AgenticQueryRequest):
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Merge explicit tickers/universe into user_context so the planner can use them.
+    user_ctx: dict = dict(req.user_context or {})
+    if req.tickers:
+        user_ctx["provided_tickers"] = [str(t).strip().upper() for t in req.tickers if t]
+    if req.universe:
+        user_ctx["universe"] = [str(t).strip().upper() for t in req.universe if t]
+
     state = run_agentic_query(
         clean_query,
         history=req.history or None,
-        user_context=req.user_context or None,
+        user_context=user_ctx or None,
     )
     return state.to_dict()
 

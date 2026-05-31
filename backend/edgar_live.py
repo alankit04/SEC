@@ -40,14 +40,16 @@ _RETRY_BASE  = 1.0   # seconds; doubled each retry on 429
 
 _cache: dict[str, tuple[float, object]] = {}
 _last_request_ts = 0.0
+_rate_lock = __import__("threading").Lock()
 
 
 def _rate_limit() -> None:
     global _last_request_ts
-    elapsed = time.monotonic() - _last_request_ts
-    if elapsed < _RATE_LIMIT_SLEEP:
-        time.sleep(_RATE_LIMIT_SLEEP - elapsed)
-    _last_request_ts = time.monotonic()
+    with _rate_lock:
+        elapsed = time.monotonic() - _last_request_ts
+        if elapsed < _RATE_LIMIT_SLEEP:
+            time.sleep(_RATE_LIMIT_SLEEP - elapsed)
+        _last_request_ts = time.monotonic()
 
 
 def _cached(key: str, ttl: int):

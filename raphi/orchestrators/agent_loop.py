@@ -24,6 +24,8 @@ def run_agentic_query(query: str, history=None, user_context=None) -> WorkflowSt
         tickers=tickers
     )
     state.perception = perception
+    if user_context and user_context.get("universe"):
+        state.universe = [str(t).upper() for t in user_context["universe"] if t]
     # 1. Ticker onboarding if needed
     if tickers and intent != "casual_chat":
         state = onboard_tickers_for_query(state)

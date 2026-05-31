@@ -4,9 +4,6 @@ from raphi.orchestrators.planner import extract_tickers
 import datetime
 import re
 
-_DEFAULT_WATCHLIST = ["NVDA", "AAPL", "MSFT", "META", "TSLA", "AMZN", "GOOGL"]
-
-
 def _is_singular_trending_pick_query(query: str) -> bool:
     text = str(query or "")
     has_stock_word = bool(re.search(r"\b(stock|ticker|equity)\b", text, re.I))
@@ -167,7 +164,6 @@ def run_trending_stocks_workflow(query: str, universe=None, time_window="YTD", m
     universe_source = None
     live_discovery_used = False
     used_watchlist_only = False
-    fallback_universe = ["NVDA", "AAPL", "MSFT", "AMD", "GOOGL", "META", "AMZN", "TSLA", "AVGO", "ARM", "SMCI", "PLTR"]
     selected_universe = []
     reason = ""
     candidates = []
@@ -246,18 +242,18 @@ def run_trending_stocks_workflow(query: str, universe=None, time_window="YTD", m
                     state.discovery_queries_used = ["day_gainers", "most_actives"]
                     state.retrieval_results["live_market_candidates"] = live_market_candidates
             if not selected_universe:
-                selected_universe = fallback_universe[:max_tickers]
-                universe_source = "broad_market_fallback"
-                live_discovery_used = False
-                used_watchlist_only = False
-                reason = "Firecrawl/web discovery and live market movers returned no valid tickers; broad-market fallback used."
-    # E. If all else fails, fallback
+                state.final_answer = (
+                    "Live market data is currently unavailable and no trending tickers could be discovered. "
+                    "Please try again in a moment, or specify tickers explicitly (e.g. 'analyze NVDA, AAPL')."
+                )
+                return state
+    # E. If all else fails, tell the user — never inject a hardcoded list
     if not selected_universe:
-        selected_universe = fallback_universe[:max_tickers]
-        universe_source = "broad_market_fallback"
-        live_discovery_used = False
-        used_watchlist_only = False
-        reason = "No universe found, using broad-market fallback."
+        state.final_answer = (
+            "No trending tickers could be discovered from live sources. "
+            "Please try again in a moment, or specify tickers explicitly (e.g. 'analyze NVDA, AAPL')."
+        )
+        return state
 
     state.universe = selected_universe
     state.perception = {
