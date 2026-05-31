@@ -80,19 +80,36 @@ FRESHNESS_TERMS = [
 def perceive(user_query: str, history: Optional[List]=None, user_context: Optional[Dict]=None) -> dict:
     raw_query = user_query
     normalized_query = user_query.strip().upper()
+    query_lc = user_query.lower()
     detected_tickers = extract_tickers(user_query, user_context)
-    detected_entities = []  # Could add NER here if needed
+    detected_entities = []
     possible_intents = []
     freshness_terms = [term for term in FRESHNESS_TERMS if term.upper() in normalized_query]
+    freshness_required = bool(freshness_terms)
+
+    # Data-need flags — authoritative single source of truth used by build_plan()
+    sec_terms = ["sec", "filing", "filings", "10-q", "10-k", "8-k", "form 4"]
+    market_terms = ["market", "price", "stock", "quote", "data"]
+    sec_data_needed = any(term in query_lc for term in sec_terms)
+    market_data_needed = any(term in query_lc for term in market_terms)
+    model_signal_needed = any(t in normalized_query for t in ["MODEL", "SIGNAL", "GNN", "ML"])
+    web_citation_needed = "WEB" in normalized_query or "NEWS" in normalized_query
     memory_needed = "MEMORY" in normalized_query
     portfolio_needed = "PORTFOLIO" in normalized_query
-    market_data_needed = "MARKET" in normalized_query
-    sec_data_needed = "SEC" in normalized_query or "10-K" in normalized_query or "10-Q" in normalized_query
-    model_signal_needed = "MODEL" in normalized_query or "SIGNAL" in normalized_query or "GNN" in normalized_query
-    web_citation_needed = "WEB" in normalized_query or "NEWS" in normalized_query
-    recommendation_requested = any(word in normalized_query for word in ["BUY", "SELL", "HOLD", "LONG", "SHORT", "SHOULD I"])
+    recommendation_requested = any(w in normalized_query for w in ["BUY", "SELL", "HOLD", "LONG", "SHORT", "SHOULD I"])
     confidence_score_requested = "CONFIDENCE" in normalized_query
-    freshness_required = bool(freshness_terms)
+
+    # Market-scope flags for trending queries
+    watchlist_terms = ["my watchlist", "watchlist", "my stocks", "tracked stocks", "my tracked stocks", "quick watchlist"]
+    trending_terms = ["trending", "top stocks", "movers", "hot stocks"]
+    watchlist_scope_requested = any(term in query_lc for term in watchlist_terms)
+    if watchlist_scope_requested:
+        market_scope = "user_watchlist"
+    elif any(term in query_lc for term in trending_terms):
+        market_scope = "broad_market"
+    else:
+        market_scope = None
+
     return {
         "raw_query": raw_query,
         "normalized_query": normalized_query,
@@ -100,43 +117,26 @@ def perceive(user_query: str, history: Optional[List]=None, user_context: Option
         "detected_entities": detected_entities,
         "possible_intents": possible_intents,
         "freshness_terms": freshness_terms,
-        "memory_needed": memory_needed,
-        "portfolio_needed": portfolio_needed,
-        "market_data_needed": market_data_needed,
+        "freshness_required": freshness_required,
         "sec_data_needed": sec_data_needed,
+        "market_data_needed": market_data_needed,
         "model_signal_needed": model_signal_needed,
         "web_citation_needed": web_citation_needed,
+        "memory_needed": memory_needed,
+        "portfolio_needed": portfolio_needed,
         "recommendation_requested": recommendation_requested,
         "confidence_score_requested": confidence_score_requested,
-        "freshness_required": freshness_required
+        "watchlist_scope_requested": watchlist_scope_requested,
+        "market_scope": market_scope,
     }
 
 # --- Intent Classification ---
 def classify_intent(perception: dict) -> str:
+    # Pure function: reads perception, returns intent string, does NOT mutate.
+    # All flags (sec_data_needed, market_scope, etc.) are set once in perceive().
     nq = perception.get("normalized_query") or perception.get("raw_query", "").upper()
     query = perception.get("raw_query", "")
     query_lc = query.lower()
-    # Detect SEC/filing/10-Q/10-K/8-K/Form 4
-    sec_terms = ["sec", "filing", "filings", "10-q", "10-k", "8-k", "form 4"]
-    market_terms = ["market", "price", "stock", "quote", "data"]
-    perception["sec_data_needed"] = any(term in query_lc for term in sec_terms)
-    perception["market_data_needed"] = any(term in query_lc for term in market_terms)
-
-    # Detect watchlist scope for trending queries
-    watchlist_terms = [
-        "my watchlist", "watchlist", "my stocks", "tracked stocks", "my tracked stocks", "quick watchlist"
-    ]
-    trending_terms = ["trending", "top stocks", "movers", "hot stocks"]
-    perception["watchlist_scope_requested"] = any(term in query_lc for term in watchlist_terms)
-    if perception["watchlist_scope_requested"]:
-        perception["market_scope"] = "user_watchlist"
-    elif any(term in query_lc for term in trending_terms):
-        perception["market_scope"] = "broad_market"
-    else:
-        perception["market_scope"] = None
-    # Freshness required for trending/current/latest/today/2026/movers
-    freshness_terms = ["trending", "current", "latest", "today", "2026", "movers"]
-    perception["freshness_required"] = any(term in query_lc for term in freshness_terms)
     # 1. Recommendation
     if any(term in nq for term in ["BUY", "SELL", "HOLD", "LONG", "SHORT", "SHOULD I"]):
         return "recommendation"
@@ -178,206 +178,174 @@ def classify_risk(intent: str, perception: dict) -> str:
     return "medium"
 
 def build_plan(state: WorkflowState) -> List[ToolPlanStep]:
+    """
+    Intent-first plan builder. Intent determines the canonical tool set for the query.
+    Perception flags (sec_data_needed, market_data_needed) only ADD optional steps within
+    an intent — they never override or bypass the intent-based canonical plan.
+    """
     plan = []
     tid = 0
     def next_id():
         nonlocal tid
         tid += 1
         return f"step{tid}"
-    # Plan both SEC and market tools if needed (perception-flag path)
-    for ticker in state.validated_tickers:
-        if state.perception.get("sec_data_needed"):
+
+    intent = state.intent
+    tickers = state.validated_tickers
+    p = state.perception or {}
+
+    if intent == "trending_stocks":
+        pass  # run_trending_stocks_workflow owns this entirely
+
+    elif intent == "company_factual":
+        for ticker in tickers:
             plan.append(ToolPlanStep(
-                id=next_id(),
-                tool_name="sec_filings",
-                purpose=f"Retrieve live SEC filings for {ticker} from EDGAR API",
-                required=True,
-                args={"ticker": ticker, "limit": 5},
-                expected_output="Live SEC filings list with filing dates, forms, accession/URL"
+                id=next_id(), tool_name="stock_detail",
+                purpose=f"Get live market and company profile for {ticker}",
+                required=True, args={"ticker": ticker},
+                expected_output="Market quote, price, market cap, sector, fundamentals"
             ))
             plan.append(ToolPlanStep(
-                id=next_id(),
-                tool_name="edgar_live_summary",
-                purpose=f"Retrieve live 8-K events and insider activity for {ticker}",
-                required=False,
-                args={"ticker": ticker, "days": 90},
-                expected_output="Recent 8-Ks, Form 4 insider transactions, latest 10-Q/10-K"
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="Recent news headlines with sentiment"
             ))
-        if state.perception.get("market_data_needed"):
+            if p.get("sec_data_needed"):
+                plan.append(ToolPlanStep(
+                    id=next_id(), tool_name="sec_filings",
+                    purpose=f"Get live SEC filings for {ticker}",
+                    required=False, args={"ticker": ticker, "limit": 5},
+                    expected_output="Recent 10-Q, 10-K, 8-K filings"
+                ))
+
+    elif intent in ["sec_research", "latest_filing"]:
+        for ticker in tickers:
             plan.append(ToolPlanStep(
-                id=next_id(),
-                tool_name="stock_detail",
-                purpose=f"Retrieve live market/company details for {ticker}",
-                required=True,
-                args={"ticker": ticker},
-                expected_output="Market quote/company detail with retrieved_at timestamp"
+                id=next_id(), tool_name="sec_filings",
+                purpose=f"Get live SEC filings for {ticker} from EDGAR API",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="SEC filings list with filing dates, forms, accession/URL"
             ))
             plan.append(ToolPlanStep(
-                id=next_id(),
-                tool_name="stock_news",
-                purpose=f"Retrieve latest news for {ticker}",
-                required=True,
-                args={"ticker": ticker, "limit": 5},
-                expected_output="Recent news headlines with titles, URLs, and sentiment"
+                id=next_id(), tool_name="edgar_live_summary",
+                purpose=f"Get live 8-K events and insider activity for {ticker}",
+                required=False, args={"ticker": ticker, "days": 90},
+                expected_output="Recent 8-Ks, Form 4 insider transactions"
             ))
-    # Fallback: if no flags, use intent-based plan
-    if not plan:
-        if state.intent == "company_factual":
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_detail",
-                    purpose="Get live company/ticker details",
-                    required=True,
-                    args={"ticker": ticker},
-                    expected_output="Company profile and summary"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_news",
-                    purpose=f"Get latest news for {ticker}",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="Recent news headlines"
-                ))
-        elif state.intent in ["sec_research", "latest_filing"]:
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="sec_filings",
-                    purpose="Get live SEC filings from EDGAR API",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="SEC filings list from live EDGAR API"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="edgar_live_summary",
-                    purpose=f"Get live 8-K events and insider activity for {ticker}",
-                    required=False,
-                    args={"ticker": ticker, "days": 90},
-                    expected_output="Recent 8-Ks, Form 4s, latest 10-Q/10-K"
-                ))
-        elif state.intent == "recommendation":
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="sec_filings",
-                    purpose="Get live SEC filings from EDGAR API",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="SEC filings list"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_detail",
-                    purpose="Get live company/ticker details",
-                    required=True,
-                    args={"ticker": ticker},
-                    expected_output="Company profile and summary"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_news",
-                    purpose=f"Get latest news for {ticker}",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="Recent news headlines"
-                ))
-        elif state.intent == "model_signal":
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="ml_signal",
-                    purpose="Generate model signal and confidence provenance",
-                    required=False,
-                    args={"ticker": ticker},
-                    expected_output="Model signal or explicit unavailable status"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_detail",
-                    purpose="Get live market context for signal interpretation",
-                    required=False,
-                    args={"ticker": ticker},
-                    expected_output="Market quote/company detail"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_news",
-                    purpose=f"Get latest news for {ticker}",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="Recent news headlines"
-                ))
-        elif state.intent == "investment_memo":
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="sec_filings",
-                    purpose=f"Get live SEC filings for {ticker} to support memo",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="SEC filings list with forms, dates, and accession numbers"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="edgar_live_summary",
-                    purpose=f"Get live 8-K events and insider activity for {ticker}",
-                    required=False,
-                    args={"ticker": ticker, "days": 90},
-                    expected_output="Recent 8-Ks, Form 4s, latest 10-Q/10-K"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_detail",
-                    purpose=f"Get live market and company profile for {ticker}",
-                    required=True,
-                    args={"ticker": ticker},
-                    expected_output="Market quote, sector, market cap, and fundamentals"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_news",
-                    purpose=f"Get latest news for {ticker}",
-                    required=True,
-                    args={"ticker": ticker, "limit": 5},
-                    expected_output="Recent news headlines"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="ml_signal",
-                    purpose=f"Get model signal for {ticker} to include in memo",
-                    required=False,
-                    args={"ticker": ticker},
-                    expected_output="Model signal direction, confidence, and SHAP features"
-                ))
-        elif state.intent == "portfolio_risk":
             plan.append(ToolPlanStep(
-                id=next_id(),
-                tool_name="portfolio_snapshot",
-                purpose="Retrieve current portfolio positions and weights",
-                required=True,
-                args={},
-                expected_output="Portfolio holdings, weights, P&L, VaR, Sharpe ratio"
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="Recent news headlines"
             ))
-            for ticker in state.validated_tickers:
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_detail",
-                    purpose=f"Get live market detail for portfolio position {ticker}",
-                    required=False,
-                    args={"ticker": ticker},
-                    expected_output="Market quote and price change for risk context"
-                ))
-                plan.append(ToolPlanStep(
-                    id=next_id(),
-                    tool_name="stock_news",
-                    purpose=f"Get latest news for {ticker}",
-                    required=True,
-                    args={"ticker": ticker, "limit": 3},
-                    expected_output="Recent news headlines for risk context"
-                ))
-        elif state.intent == "trending_stocks":
-            pass  # handled by trending_stocks_workflow; no tool plan steps needed
+
+    elif intent == "recommendation":
+        for ticker in tickers:
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="sec_filings",
+                purpose=f"Get SEC filings for {ticker} — required for recommendation evidence",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="SEC filings list"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="edgar_live_summary",
+                purpose=f"Get live 8-K events and insider activity for {ticker}",
+                required=False, args={"ticker": ticker, "days": 90},
+                expected_output="Recent 8-Ks, Form 4s"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_detail",
+                purpose=f"Get live market data for {ticker}",
+                required=True, args={"ticker": ticker},
+                expected_output="Market quote and company fundamentals"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="Recent news headlines"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="ml_signal",
+                purpose=f"Get model signal for {ticker} — needed for recommendation provenance",
+                required=False, args={"ticker": ticker},
+                expected_output="Model signal direction and confidence"
+            ))
+
+    elif intent == "model_signal":
+        for ticker in tickers:
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="ml_signal",
+                purpose=f"Generate model signal and confidence provenance for {ticker}",
+                required=False, args={"ticker": ticker},
+                expected_output="Model signal or explicit unavailable status"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_detail",
+                purpose=f"Get live market context for {ticker} signal interpretation",
+                required=False, args={"ticker": ticker},
+                expected_output="Market quote and fundamentals"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="Recent news headlines"
+            ))
+
+    elif intent == "investment_memo":
+        for ticker in tickers:
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="sec_filings",
+                purpose=f"Get SEC filings for {ticker} to support memo",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="SEC filings with forms, dates, accession numbers"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="edgar_live_summary",
+                purpose=f"Get live 8-K events and insider activity for {ticker}",
+                required=False, args={"ticker": ticker, "days": 90},
+                expected_output="Recent 8-Ks and Form 4 insider transactions"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_detail",
+                purpose=f"Get market and company profile for {ticker}",
+                required=True, args={"ticker": ticker},
+                expected_output="Market quote, sector, market cap, fundamentals"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 5},
+                expected_output="Recent news headlines"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="ml_signal",
+                purpose=f"Get model signal for {ticker} to include in memo",
+                required=False, args={"ticker": ticker},
+                expected_output="Model signal direction, confidence, SHAP features"
+            ))
+
+    elif intent == "portfolio_risk":
+        plan.append(ToolPlanStep(
+            id=next_id(), tool_name="portfolio_snapshot",
+            purpose="Retrieve current portfolio positions and weights",
+            required=True, args={},
+            expected_output="Portfolio holdings, weights, P&L, VaR, Sharpe ratio"
+        ))
+        for ticker in tickers:
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_detail",
+                purpose=f"Get live market detail for portfolio position {ticker}",
+                required=False, args={"ticker": ticker},
+                expected_output="Market quote and price change for risk context"
+            ))
+            plan.append(ToolPlanStep(
+                id=next_id(), tool_name="stock_news",
+                purpose=f"Get latest news for {ticker}",
+                required=True, args={"ticker": ticker, "limit": 3},
+                expected_output="Recent news headlines for risk context"
+            ))
+
     return plan

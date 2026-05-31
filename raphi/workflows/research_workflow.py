@@ -190,25 +190,33 @@ def run_research_workflow(state: WorkflowState) -> WorkflowState:
             notes=notes
         ))
     state.claim_citation_map = claim_citation_map
-    # 6. Recommendation downgrade for high-risk
+    # 6. Recommendation governance — always set a Recommendation object for this intent
     if state.intent == "recommendation":
-        # If no model_signals or governance, downgrade
-        if not state.model_signals:
-            from raphi.orchestrators.state import Recommendation
-            state.recommendation = Recommendation(
-                decision="research_only",
-                confidence=None,
-                confidence_source="",
-                rationale=["No model or governance provenance for recommendation"],
-                risk_framing=["High risk: unsupported recommendation"],
-                allowed=False,
-                downgrade_reason="missing_model_or_governance_provenance"
-            )
-            state.governance_status = {
-                "status": "downgraded",
-                "reason": "missing_model_or_governance_provenance",
-                "allowed": False,
-            }
+        from raphi.orchestrators.state import Recommendation
+        has_signals = bool(state.model_signals)
+        # No governance approval path exists yet; all recommendations are research_only for now.
+        # When model signals are present the downgrade reason is different but the outcome
+        # is the same: the system lacks an approved governance gate to allow a live trade signal.
+        if not has_signals:
+            downgrade_reason = "missing_model_or_governance_provenance"
+            rationale = ["No model signal provenance for recommendation"]
+        else:
+            downgrade_reason = "missing_governance_approval"
+            rationale = [f"Model signal available ({len(state.model_signals)} signal(s)) but no governance approval gate configured"]
+        state.recommendation = Recommendation(
+            decision="research_only",
+            confidence=None,
+            confidence_source="",
+            rationale=rationale,
+            risk_framing=["High risk: unsupported recommendation"],
+            allowed=False,
+            downgrade_reason=downgrade_reason,
+        )
+        state.governance_status = {
+            "status": "downgraded",
+            "reason": downgrade_reason,
+            "allowed": False,
+        }
     elif state.intent == "model_signal":
         state.governance_status = {
             "status": "research_only",
