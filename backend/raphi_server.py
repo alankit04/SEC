@@ -569,19 +569,6 @@ def _watchlist(user_scope: str = "global") -> list[str]:
     return tickers
 
 
-def _allowed_watchlist_tickers(requested: list[str], *, extra_tickers: list[str] | None = None, user_scope: str = "global") -> list[str]:
-    extra_tickers = extra_tickers or []
-    universe: list[str] = []
-    seen: set[str] = set()
-    for raw in [*extra_tickers, *(requested or []), *_watchlist(user_scope)]:
-        ticker = _ticker_symbol(raw)
-        if ticker not in seen:
-            universe.append(ticker)
-            seen.add(ticker)
-    if len(universe) < 2:
-        raise HTTPException(422, "GNN needs at least 2 valid tickers.")
-    return universe
-
 
 def _ticker_identity(ticker: str) -> dict:
     ticker = _ticker_symbol(ticker)
