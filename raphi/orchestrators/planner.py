@@ -177,7 +177,6 @@ def classify_risk(intent: str, perception: dict) -> str:
         return "low"
     return "medium"
 
-# --- Build Plan (stub, to be expanded) ---
 def build_plan(state: WorkflowState) -> List[ToolPlanStep]:
     plan = []
     tid = 0

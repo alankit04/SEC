@@ -180,7 +180,19 @@ def run_trending_stocks_workflow(query: str, universe=None, time_window="YTD", m
         reason = "Explicit universe provided by user."
     # B. Watchlist scope
     elif market_scope == "user_watchlist":
-        selected_universe = _DEFAULT_WATCHLIST[:max_tickers]
+        try:
+            from backend.user_data_store import settings_path, load_json
+            user_settings = load_json(settings_path("global"), default={})
+            user_watchlist = [str(t).strip().upper() for t in user_settings.get("watchlist", []) if t]
+        except Exception:
+            user_watchlist = []
+        if not user_watchlist:
+            state.final_answer = (
+                "Your watchlist is empty. Add tickers first — for example: "
+                "'track AAPL' or 'add NVDA to my watchlist'."
+            )
+            return state
+        selected_universe = user_watchlist[:max_tickers]
         universe_source = "user_watchlist"
         live_discovery_used = False
         used_watchlist_only = True

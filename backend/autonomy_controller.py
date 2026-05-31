@@ -185,7 +185,7 @@ class AutonomyController:
     def _ema(old: float, new: float, n: int) -> float:
         if n <= 1:
             return float(new)
-        alpha = min(0.35, 2.0 / (n + 1.0))
+        alpha = 2.0 / (n + 1.0)
         return (1.0 - alpha) * float(old) + alpha * float(new)
 
     def calibrated_confidence(self, raw_confidence: float) -> float:

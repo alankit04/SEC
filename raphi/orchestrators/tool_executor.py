@@ -198,33 +198,36 @@ def execute_plan(state: WorkflowState) -> WorkflowState:
         result = None
         timeout = _TOOL_TIMEOUT.get(step.tool_name, _DEFAULT_TIMEOUT)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(call_tool, step.tool_name, **step.args)
-            try:
-                result = future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
-                if step.required:
-                    # Primary source timed out — try Firecrawl before giving up
-                    fallback = _firecrawl_fallback(step.tool_name, step.args)
-                    if fallback:
-                        result = fallback
-                        error = None
-                    else:
-                        # Firecrawl also failed — tell user clearly
-                        ticker = step.args.get("ticker", "")
-                        state.final_answer = (
-                            f"Could not retrieve {step.tool_name}"
-                            f"{f' for {ticker}' if ticker else ''} — "
-                            f"primary source timed out after {timeout}s and the "
-                            f"web fallback also returned no data. Please try again."
-                        )
-                        state.add_error({"tool": step.tool_name, "error": f"timed out after {timeout}s, fallback failed"})
-                        return state
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(call_tool, step.tool_name, **step.args)
+        try:
+            result = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            pool.shutdown(wait=False)
+            if step.required:
+                # Primary source timed out — try Firecrawl before giving up
+                fallback = _firecrawl_fallback(step.tool_name, step.args)
+                if fallback:
+                    result = fallback
+                    error = None
                 else:
-                    # Optional tool — skip silently
-                    result = {"error": f"Tool {step.tool_name} timed out after {timeout}s (optional, skipped)"}
-                    ok = False
-                    error = result["error"]
+                    # Firecrawl also failed — tell user clearly
+                    ticker = step.args.get("ticker", "")
+                    state.final_answer = (
+                        f"Could not retrieve {step.tool_name}"
+                        f"{f' for {ticker}' if ticker else ''} — "
+                        f"primary source timed out after {timeout}s and the "
+                        f"web fallback also returned no data. Please try again."
+                    )
+                    state.add_error({"tool": step.tool_name, "error": f"timed out after {timeout}s, fallback failed"})
+                    return state
+            else:
+                # Optional tool — skip silently
+                result = {"error": f"Tool {step.tool_name} timed out after {timeout}s (optional, skipped)"}
+                ok = False
+                error = result["error"]
+        else:
+            pool.shutdown(wait=False)
 
         if result is None:
             result = {"error": f"Tool {step.tool_name} returned no data"}
@@ -238,8 +241,8 @@ def execute_plan(state: WorkflowState) -> WorkflowState:
         state.add_trace(ToolTrace(
             tool_name=step.tool_name,
             args=step.args,
-            started_at=str(start),
-            ended_at=str(end),
+            started_at=datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+            ended_at=datetime.fromtimestamp(end, tz=timezone.utc).isoformat(),
             latency_ms=int((end - start) * 1000),
             ok=ok,
             error=error,
