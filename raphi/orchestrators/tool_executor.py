@@ -2,6 +2,7 @@ import concurrent.futures
 from datetime import datetime, timezone
 
 from raphi.orchestrators.state import WorkflowState, ToolPlanStep, ToolTrace
+from backend.retrieval_guardrail import screen_retrieval_result
 import time
 
 
@@ -237,6 +238,9 @@ def execute_plan(state: WorkflowState) -> WorkflowState:
             error = result["error"]
 
         end = time.time()
+        # Control Plane 3 — retrieval gate. Screen external tool output for
+        # prompt-injection payloads before it is trusted as context.
+        result = screen_retrieval_result(step.tool_name, result)
         state.retrieval_results[step.id] = result
         state.add_trace(ToolTrace(
             tool_name=step.tool_name,
