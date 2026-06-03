@@ -4277,6 +4277,7 @@ class AgenticQueryRequest(BaseModel):
 @api.post("/agentic/query")
 async def agentic_query(req: AgenticQueryRequest):
     from backend.security import sanitize_user_input
+    from backend.input_guardrail import classify_input_bucket
     from raphi.orchestrators.agent_loop import run_agentic_query
 
     try:
@@ -4284,6 +4285,29 @@ async def agentic_query(req: AgenticQueryRequest):
     except ValueError as exc:
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Control Plane 1 — entry gate. A non-finance query is handled here and never
+    # enters the agentic loop, so it cannot produce a Perceive→Plan→Execute state
+    # dump. The natural-language response handler is a separate plane; this is an
+    # interim placeholder reply.
+    if classify_input_bucket(clean_query) == "general":
+        import uuid
+
+        from raphi.orchestrators.state import WorkflowState
+
+        state = WorkflowState(
+            run_id=str(uuid.uuid4()),
+            user_query=clean_query,
+            intent="general",
+            risk_class="low",
+            entities=[],
+            tickers=[],
+            final_answer=(
+                "I'm RAPHI. I help with financial-markets research — ask me about a "
+                "company, a filing, or your portfolio and I'll take it from there."
+            ),
+        )
+        return state.to_dict()
 
     # Merge explicit tickers/universe into user_context so the planner can use them.
     user_ctx: dict = dict(req.user_context or {})

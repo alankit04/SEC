@@ -23,10 +23,13 @@ def is_unique_run_id(run_id):
 
 # SYSTEM TEST 1 — CASUAL AI QUERY
 def test_casual_ai_query():
+    # "What is RAPHI?" is a general/identity query. Control Plane 1 (the input
+    # guardrail) routes it to the "general" bucket and short-circuits before the
+    # agentic loop runs — it must not produce a casual_chat state dump.
     resp = client.post("/api/agentic/query", json={"query": "What is RAPHI?"}, headers=_H)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["intent"] == "casual_chat"
+    assert data["intent"] == "general"
     assert data["risk_class"] == "low"
     assert not data.get("validated_tickers")
     assert not data.get("tool_plan")
