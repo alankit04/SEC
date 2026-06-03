@@ -4321,7 +4321,58 @@ async def agentic_query(req: AgenticQueryRequest):
         history=req.history or None,
         user_context=user_ctx or None,
     )
-    return state.to_dict()
+
+    # Control Plane 2 — output gate. The loop's final_answer is the model-facing
+    # answer; run it through the same deterministic guardrails the chat path uses
+    # (overconfidence softening, memo-schema repair, unverified-ticker flagging)
+    # before it reaches the client, and surface the report.
+    data = _apply_agentic_output_guardrail(state)
+    return data
+
+
+def _agentic_allowed_tickers(state) -> set:
+    """Tickers the state legitimately surfaced — so the output gate flags only
+    fabricated symbols in prose, not real validated/ranked/discovered results."""
+    allowed: set[str] = set()
+    for t in (state.validated_tickers or []):
+        allowed.add(str(t).upper())
+    for t in (state.tickers or []):
+        allowed.add(str(t).upper())
+    for row in (state.ranking_table or []):
+        t = str((row or {}).get("ticker") or "").upper().strip()
+        if t:
+            allowed.add(t)
+    for cand in (state.discovery_candidates or []):
+        t = str((cand or {}).get("ticker") or "").upper().strip()
+        if t:
+            allowed.add(t)
+    return allowed
+
+
+def _apply_agentic_output_guardrail(state) -> dict:
+    allowed = _agentic_allowed_tickers(state)
+    successful_tools = sorted({
+        tr.tool_name for tr in (state.tool_trace or [])
+        if getattr(tr, "ok", False) and tr.tool_name
+    })
+    context = GuardrailContext(
+        ticker=(state.validated_tickers[0].upper() if state.validated_tickers else ""),
+        allowed_tickers=allowed,
+        source_summary=("live tools: " + ", ".join(successful_tools)) if successful_tools else "",
+        require_memo_schema=(state.intent == "investment_memo"),
+    )
+    repaired, report = validate_and_repair_response(state.final_answer or "", context)
+    state.final_answer = repaired
+
+    data = state.to_dict()
+    data["output_guardrail"] = {
+        "valid": report.valid,
+        "repairs": report.repairs,
+        "warnings": report.warnings,
+        "missing_sections": report.missing_sections,
+        "unknown_tickers": report.unknown_tickers,
+    }
+    return data
 
 
 # ── register data router ──────────────────────────────────────────────
