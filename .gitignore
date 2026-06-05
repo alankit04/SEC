@@ -72,3 +72,6 @@ docs/landing/.next/
 
 # Neo4j logs
 .docker/neo4j/logs/
+
+# ── Runtime logs ─────────────────────────────────────────────────────
+*.log
